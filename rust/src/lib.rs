@@ -27,6 +27,7 @@ mod descriptors;
 mod gc;
 mod init;
 mod io;
+mod lex;
 mod object;
 mod shadow_stack;
 mod string_ops;
