@@ -23,7 +23,7 @@ pub enum LexTokenType {
     Comma,
     Period,
     Semicolon,
-    Equals, // note: equals is used as both a binop and for assignment. Parser must decide this
+    Equals, // note: equals is used as a binop and for assignment. Parser must decide which
     QuestionMark,
     Colon,
 
@@ -84,7 +84,6 @@ pub struct Lexer;
 
 impl Lexer {
     pub fn pop(&mut self) -> Result<LexedToken, LexError> {
-        // Implementation of pop method
         unimplemented!()
     }
 
