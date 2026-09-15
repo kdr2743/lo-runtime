@@ -107,11 +107,7 @@ pub unsafe extern "C" fn lo_string_repeat(s: *mut Object, n: i32) -> *mut Object
     }
 
     if n < 0 {
-<<<<<<< HEAD
         crate::abort::runtime_abort("lo_string_repeat: negative count", 120);
-=======
-        crate::abort::runtime_abort("lo_string_repeat: negative repeat count", 120);
->>>>>>> origin/main
     }
 
     // SAFETY: the caller supplies a valid string. The frame keeps the input alive across allocation,
