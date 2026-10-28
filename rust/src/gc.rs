@@ -16,10 +16,20 @@
 //! run on one heap — so it needs no ABI pin. All three skeletons (Rust / Zig /
 //! C++) use this same bit so cross-skeleton header encoding stays byte-identical.
 
+use std::cell::RefCell;
+use std::collections::HashSet;
+
 use crate::descriptors::LO_STRING_CLASS;
 use crate::object::{
     shadow_frame_roots_offset, string_data_offset, ClassDescriptor, Object, StringObject,
 };
+
+// rust weirdness; hard to make a mutable static variable under ownership rules,
+// declaring it thread local satisfies the compiler. Runtime is single threaded
+thread_local! {
+    static REMEMBERED_SET: RefCell<HashSet<*mut Object>> =
+        RefCell::new(HashSet::new());
+}
 
 /// Forwarding-flag bit in `gc_bits` (decision (C)). See module docs.
 pub(crate) const GC_FORWARDED_BIT: u32 = 0b1;
@@ -40,6 +50,12 @@ pub unsafe extern "C" fn lo_gc_write_barrier(
     value: *mut Object,
 ) {
     let slot = (obj as *mut u8).add(field_offset as usize) as *mut *mut Object;
+    let old = *slot;
+    if crate::alloc::in_tenure(obj) && crate::alloc::in_nursery(old) {
+        REMEMBERED_SET.with_borrow_mut(|set| {
+            set.insert(obj);
+        });
+    }
     *slot = value;
 }
 
