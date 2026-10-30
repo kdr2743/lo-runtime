@@ -102,11 +102,11 @@ pub(crate) fn heap_init() {
 }
 
 pub(crate) unsafe fn in_tenure(obj: *mut Object) -> bool {
-    obj as *mut u8 >= TENURED_FROM_BASE && obj as *mut u8 <= TENURED_FROM_LIMIT
+    (obj as *mut u8) >= TENURED_FROM_BASE && (obj as *mut u8) < TENURED_FROM_LIMIT
 }
 
 pub(crate) unsafe fn in_nursery(obj: *mut Object) -> bool {
-    obj as *mut u8 >= NURSERY_BASE && obj as *mut u8 <= NURSERY_LIMIT
+    (obj as *mut u8) >= NURSERY_BASE && (obj as *mut u8) < NURSERY_LIMIT
 }
 
 /// Release the heap region. Called from `lo_runtime_shutdown`.
@@ -170,15 +170,19 @@ unsafe fn alloc_raw(size: usize, class: *const ClassDescriptor) -> *mut Object {
 /// # Safety
 /// Reads/writes the allocator statics on the single runtime thread.
 unsafe fn bump_if_fits(size: usize) -> *mut u8 {
-    let bump = TENURED_FREE;
-    let limit = TENURED_FROM_LIMIT;
+    let bump = NURSERY_FREE;
+    let n_limit = NURSERY_LIMIT;
+    debug_assert!(!bump.is_null(), "heap must be initialized");
     // Address arithmetic for the bounds check avoids forming an out-of-bounds
     // pointer when the request would overflow the semispace.
-    let new_addr = (bump as usize).wrapping_add(size);
-    if bump.is_null() || new_addr > limit as usize {
+    let Some(new_addr) = (bump as usize).checked_add(size) else {
+        return ptr::null_mut();
+    };
+
+    if new_addr > n_limit as usize {
         return ptr::null_mut();
     }
-    TENURED_FREE = bump.add(size);
+    NURSERY_FREE = bump.add(size);
     bump
 }
 
@@ -228,8 +232,32 @@ pub(crate) unsafe fn bump_alloc_string(len: u32) -> *mut Object {
 ///
 /// # Safety
 /// By-value reads of the allocator statics on the single runtime thread.
-pub(crate) unsafe fn from_space() -> (*mut u8, *mut u8) {
+pub(crate) unsafe fn tenure_from_space() -> (*mut u8, *mut u8) {
     (TENURED_FROM_BASE, TENURED_FROM_LIMIT)
+}
+
+/// Nursery space bounds
+///
+/// # Safety
+/// By-value reads of the allocator statics on the single runtime thread.
+pub(crate) unsafe fn nursery_space() -> (*mut u8, *mut u8) {
+    (NURSERY_BASE, NURSERY_LIMIT)
+}
+
+pub(crate) unsafe fn nursery_free() -> *mut u8 {
+    NURSERY_FREE
+}
+
+pub(crate) unsafe fn tenure_free() -> *mut u8 {
+    TENURED_FREE
+}
+
+pub(crate) unsafe fn set_tenure_free(new_free: *mut u8) {
+    TENURED_FREE = new_free;
+}
+
+pub(crate) unsafe fn reset_nursery() {
+    NURSERY_FREE = NURSERY_BASE;
 }
 
 /// Start of the inactive (to-)space — where the collector copies survivors.

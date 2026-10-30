@@ -24,11 +24,24 @@ use crate::object::{
     shadow_frame_roots_offset, string_data_offset, ClassDescriptor, Object, StringObject,
 };
 
-// rust weirdness; hard to make a mutable static variable under ownership rules,
+// satisfying rust ownership rules; hard to make a mutable static variable under ownership rules,
 // declaring it thread local satisfies the compiler. Runtime is single threaded
 thread_local! {
     static REMEMBERED_SET: RefCell<HashSet<*mut Object>> =
         RefCell::new(HashSet::new());
+}
+
+#[derive(Debug, Clone, Copy)]
+struct Region {
+    base: usize,
+    limit: usize,
+}
+
+impl Region {
+    fn contains(self, obj: *const Object) -> bool {
+        let addr = obj as usize;
+        addr >= self.base && addr < self.limit
+    }
 }
 
 /// Forwarding-flag bit in `gc_bits` (decision (C)). See module docs.
@@ -50,8 +63,7 @@ pub unsafe extern "C" fn lo_gc_write_barrier(
     value: *mut Object,
 ) {
     let slot = (obj as *mut u8).add(field_offset as usize) as *mut *mut Object;
-    let old = *slot;
-    if crate::alloc::in_tenure(obj) && crate::alloc::in_nursery(old) {
+    if crate::alloc::in_tenure(obj) && crate::alloc::in_nursery(value) {
         REMEMBERED_SET.with_borrow_mut(|set| {
             set.insert(obj);
         });
@@ -108,19 +120,13 @@ unsafe fn object_size(p: *mut Object) -> usize {
 /// # Safety
 /// `p` is null or a valid object pointer. `free` points at enough room in to-space
 /// for the largest live object. Single-threaded.
-unsafe fn forward(
-    p: *mut Object,
-    from_base: *mut u8,
-    from_limit: *mut u8,
-    free: &mut *mut u8,
-) -> *mut Object {
-    if p.is_null() {
+unsafe fn forward(p: *mut Object, regions: &[Region], free: &mut *mut u8) -> *mut Object {
+    // if it is not any "from" space, return p
+    if p.is_null() || !regions.iter().any(|r| r.contains(p)) {
         return p;
     }
     let addr = p as *mut u8;
-    if addr < from_base || addr >= from_limit {
-        return p; // immortal / non-heap: leave untouched
-    }
+
     if (*p).gc_bits & GC_FORWARDED_BIT != 0 {
         // Already moved; the class_descriptor slot holds the new address.
         return (*p).class_descriptor as *mut Object;
@@ -143,7 +149,8 @@ unsafe fn forward(
 /// a null/uninitialized heap, in which case both spaces are empty and this is a
 /// no-op).
 unsafe fn collect() {
-    let (from_base, from_limit) = crate::alloc::from_space();
+    let (tenure_from_base, tenure_from_limit) = crate::alloc::tenure_from_space();
+    let (nursery_base, nursery_limit) = crate::alloc::nursery_space();
     let to_base = crate::alloc::to_space_base();
     let mut free = to_base;
     let mut scan = to_base;
@@ -151,6 +158,14 @@ unsafe fn collect() {
     // 1–2. Scan the root set: every slot of every shadow-stack frame, walking
     // `current_frame` -> `parent` to null (ABI §3.3). The shadow stack is the
     // complete root set.
+    let nursery_region = Region {
+        base: nursery_base as usize,
+        limit: nursery_limit as usize,
+    };
+    let tenure_region = Region {
+        base: tenure_from_base as usize,
+        limit: tenure_from_limit as usize,
+    };
     let mut frame = crate::shadow_stack::current_frame();
     while !frame.is_null() {
         let num = (*frame).num_roots as usize;
@@ -194,6 +209,96 @@ unsafe fn collect() {
         let len = (from_limit as usize) - (from_base as usize);
         core::ptr::write_bytes(from_base, 0xEF, len);
     }
+}
+
+// temp name
+unsafe fn collect_new() {
+    let (tenure_from_base, tenure_from_limit) = crate::alloc::tenure_from_space();
+    let (nursery_base, nursery_limit) = crate::alloc::nursery_space();
+    let nursery_free = crate::alloc::nursery_free();
+    let tenure_free = crate::alloc::tenure_free();
+    let to_base = crate::alloc::to_space_base();
+
+    // check if nursery could fit in current tenured from space
+    let nursery_size = nursery_free as usize - nursery_base as usize;
+    let tenure_size_free = tenure_from_limit as usize - tenure_free as usize;
+    let major_alloc = nursery_size > tenure_size_free;
+
+    // decide where to copy from and to depending on major or minor allocation
+    let (from_regions, mut free) = if major_alloc {
+        (
+            vec![
+                Region {
+                    base: tenure_from_base as usize,
+                    limit: tenure_from_limit as usize,
+                },
+                Region {
+                    base: nursery_base as usize,
+                    limit: nursery_limit as usize,
+                },
+            ],
+            to_base,
+        )
+    } else {
+        (
+            vec![Region {
+                base: nursery_base as usize,
+                limit: nursery_limit as usize,
+            }],
+            tenure_free,
+        )
+    };
+    let mut scan = free;
+    let mut frame = crate::shadow_stack::current_frame();
+    while !frame.is_null() {
+        let num = (*frame).num_roots as usize;
+        let roots_base = (frame as *mut u8).add(shadow_frame_roots_offset());
+        for i in 0..num {
+            let slot = roots_base.add(i * core::mem::size_of::<*mut Object>()) as *mut *mut Object;
+            if major_alloc || crate::alloc::in_nursery(*slot) {
+                *slot = forward(*slot, &from_regions, &mut free);
+            }
+        }
+        frame = (*frame).parent;
+    }
+
+    if !major_alloc {
+        REMEMBERED_SET.with_borrow_mut(|set| {
+            for obj in set.drain() {
+                let class = (*obj).class_descriptor;
+                for i in 0..(*class).pointer_count as usize {
+                    let off = *(*class).pointer_offsets.add(i) as usize;
+                    let slot = (obj as *mut u8).add(off) as *mut *mut Object;
+                    *slot = forward(*slot, &from_regions, &mut free);
+                }
+            }
+        })
+    }
+
+    // 3. Cheney loop: scan copied objects in to-space, forwarding each pointer
+    // field, until `scan` catches `free`. Strings have `pointer_count == 0`, so
+    // they only advance `scan` — but `object_size` still uses the variable-size
+    // branch to advance correctly.
+    while scan < free {
+        let obj = scan as *mut Object;
+        let class = (*obj).class_descriptor;
+        let count = (*class).pointer_count as usize;
+        let offsets = (*class).pointer_offsets;
+        for i in 0..count {
+            let off = *offsets.add(i) as usize;
+            let slot = (obj as *mut u8).add(off) as *mut *mut Object;
+            *slot = forward(*slot, &from_regions, &mut free);
+        }
+        scan = scan.add(object_size(obj));
+    }
+
+    if major_alloc {
+        crate::alloc::flip(free);
+    } else {
+        crate::alloc::set_tenure_free(free);
+    }
+    crate::alloc::reset_nursery();
+    REMEMBERED_SET.with_borrow_mut(|set| set.clear());
 }
 
 /// Whether `LO_GC_POISON` requests poisoning the abandoned from-space after each
