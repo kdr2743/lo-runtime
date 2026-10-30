@@ -4,22 +4,18 @@
 //! Cheney semispaces. The nursery targets one quarter of the aligned heap;
 //! rounding leftovers go to it so the tenured spaces remain equal.
 //!
-//! This is a transitional layout only: the nursery is reserved, not yet used.
-//! Allocation bumps `TENURED_FREE` in the active tenured from-space. On a no-fit,
-//! `lo_alloc` invokes the existing Cheney collector and retries once; live-set
-//! overflow aborts (exit 137 native / `unreachable` WASM). Minor collection is
-//! not implemented here.
+//! Allocation bumps through the nursery. On a no-fit, `lo_alloc` collects and
+//! retries once; failure to fit aborts (exit 137 native / `unreachable` WASM).
+//! Minor collections immediately promote survivors into the active tenured tail;
+//! major collections copy nursery and active tenured survivors into the spare.
 //!
 //! Total heap size defaults to 16 MiB and can be overridden at initialization
 //! with `LO_HEAP_SIZE`. Values below three alignment units use the default;
 //! trailing bytes that do not form a full alignment unit are discarded.
 //!
-//! The heap pointers are `static mut` raw scalars (the runbook sanctions
-//! `static mut` for the bump pointer). Every access is by value or through a raw
-//! pointer — never `&`/`&mut` of the statics — which keeps this module clear of
-//! the `static_mut_refs` lint. Invariant: only the functions here and the
-//! collector's commit ([`flip`]) touch these, and only on the single runtime
-//! thread.
+//! Heap state is accessed only on the single runtime thread, by value or raw
+//! pointer rather than references to the mutable statics. The collector updates
+//! allocation boundaries through this module's accessors.
 
 use core::alloc::Layout;
 use core::ptr;
@@ -38,7 +34,7 @@ static mut HEAP_BASE: *mut u8 = ptr::null_mut();
 /// Layout the region was allocated with (for `dealloc`).
 static mut HEAP_LAYOUT: Option<Layout> = None;
 
-/// Reserved nursery; unused until minor collection is implemented.
+/// Nursery allocation region; emptied after every collection.
 static mut NURSERY_BASE: *mut u8 = ptr::null_mut();
 static mut NURSERY_LIMIT: *mut u8 = ptr::null_mut();
 static mut NURSERY_FREE: *mut u8 = ptr::null_mut();
@@ -47,7 +43,7 @@ static mut TENURED_FROM_BASE: *mut u8 = ptr::null_mut();
 static mut TENURED_FROM_LIMIT: *mut u8 = ptr::null_mut();
 static mut TENURED_FREE: *mut u8 = ptr::null_mut();
 /// Inactive tenured (to-)space: `[TENURED_TO_BASE, TENURED_TO_LIMIT)`. The collector copies survivors
-/// here and then [`flip`]s the roles.
+/// here during a major collection and then [`flip`]s the roles.
 static mut TENURED_TO_BASE: *mut u8 = ptr::null_mut();
 static mut TENURED_TO_LIMIT: *mut u8 = ptr::null_mut();
 
@@ -135,9 +131,9 @@ pub(crate) fn heap_shutdown() {
     }
 }
 
-/// Carve `size` zero-initialized bytes from the active semispace and stamp the
-/// object header. On a no-fit, forces one collection and retries; aborts (exit
-/// 137) only if the live set still leaves no room (runbook WS-2 §2.1, ABI §3.1).
+/// Carve `size` zero-initialized bytes from the nursery and stamp the header.
+/// On a no-fit, collect with automatic minor/major selection and retry once;
+/// abort (exit 137 native) if the request still does not fit.
 ///
 /// # Safety
 /// `class` must point at a valid, live `ClassDescriptor`. `size` must be at least
@@ -148,7 +144,7 @@ unsafe fn alloc_raw(size: usize, class: *const ClassDescriptor) -> *mut Object {
         bump
     } else {
         // OOM path: collect, then retry the bump exactly once.
-        crate::gc::lo_gc_collect();
+        crate::gc::collect(false);
         let retry = bump_if_fits(size);
         if retry.is_null() {
             crate::abort::runtime_abort("lo_alloc: out of memory", 137);
@@ -164,8 +160,8 @@ unsafe fn alloc_raw(size: usize, class: *const ClassDescriptor) -> *mut Object {
     obj
 }
 
-/// Try to bump `size` bytes off the active semispace. Returns the carved slot on
-/// success, or null if it does not fit (or the heap is uninitialized).
+/// Try to bump `size` bytes from the nursery. Return the carved slot on
+/// success, or null if it does not fit. The heap must be initialized.
 ///
 /// # Safety
 /// Reads/writes the allocator statics on the single runtime thread.
@@ -174,7 +170,7 @@ unsafe fn bump_if_fits(size: usize) -> *mut u8 {
     let n_limit = NURSERY_LIMIT;
     debug_assert!(!bump.is_null(), "heap must be initialized");
     // Address arithmetic for the bounds check avoids forming an out-of-bounds
-    // pointer when the request would overflow the semispace.
+    // pointer when the request would overflow the nursery.
     let Some(new_addr) = (bump as usize).checked_add(size) else {
         return ptr::null_mut();
     };
@@ -188,7 +184,8 @@ unsafe fn bump_if_fits(size: usize) -> *mut u8 {
 
 /// Allocate a zero-initialized object of `class.instance_size` bytes
 /// (`runtime-abi.md` §3.1). Fills in the header. Triggers a collection and
-/// retries on a full semispace; aborts (exit 137) only on live-set overflow.
+/// retries on a full nursery; aborts (exit 137 native) if copying overflows the
+/// destination or the request still does not fit after collection.
 ///
 /// Codegen is responsible for finalizing String-typed fields to `LO_EMPTY_STRING`
 /// immediately after this returns (see `runtime-abi.md` §3.1); `lo_alloc` is
@@ -223,12 +220,10 @@ pub(crate) unsafe fn bump_alloc_string(len: u32) -> *mut Object {
 }
 
 // --- Collector interface ----------------------------------------------------
-// These are the seam the Cheney collector (`crate::gc`) drives. They are
-// `pub(crate)` raw-pointer accessors so the collector can range-check from-space,
-// find where to copy survivors, and commit the flip — without re-deriving the
-// heap geometry.
+// The collector uses these accessors to select source regions and copy
+// destinations, reset the nursery, and commit tenured promotion or a major flip.
 
-/// Bounds of the active (from-)space being evacuated: `(base, limit)`.
+/// Bounds of the active tenured space, evacuated only by a major collection.
 ///
 /// # Safety
 /// By-value reads of the allocator statics on the single runtime thread.
@@ -236,7 +231,7 @@ pub(crate) unsafe fn tenure_from_space() -> (*mut u8, *mut u8) {
     (TENURED_FROM_BASE, TENURED_FROM_LIMIT)
 }
 
-/// Nursery space bounds
+/// Nursery space bounds: `(base, limit)`.
 ///
 /// # Safety
 /// By-value reads of the allocator statics on the single runtime thread.
@@ -260,22 +255,22 @@ pub(crate) unsafe fn reset_nursery() {
     NURSERY_FREE = NURSERY_BASE;
 }
 
-/// Start of the inactive (to-)space — where the collector copies survivors.
+/// Bounds of the spare tenured space, the major collection destination.
 ///
 /// # Safety
 /// By-value read of the allocator statics on the single runtime thread.
-pub(crate) unsafe fn to_space_base() -> *mut u8 {
-    TENURED_TO_BASE
+pub(crate) unsafe fn to_space() -> (*mut u8, *mut u8) {
+    (TENURED_TO_BASE, TENURED_TO_LIMIT)
 }
 
-/// Commit a collection: swap the from/to roles and install `new_free` as the
+/// Commit a major collection: swap the from/to roles and install `new_free` as the
 /// bump pointer in the now-active space (which the collector just filled with
 /// survivors). The old from-space becomes the inactive to-space, entirely free
-/// for the next cycle (runbook WS-2 §2.4 step 4).
+/// for the next major collection.
 ///
 /// # Safety
 /// `new_free` must lie within the current to-space `[TENURED_TO_BASE, TENURED_TO_LIMIT]`. Called
-/// only by the collector at the end of a cycle, on the single runtime thread.
+/// only by the collector at the end of a major collection, on the runtime thread.
 pub(crate) unsafe fn flip(new_free: *mut u8) {
     let (old_from_base, old_from_limit) = (TENURED_FROM_BASE, TENURED_FROM_LIMIT);
     TENURED_FROM_BASE = TENURED_TO_BASE;
@@ -285,21 +280,31 @@ pub(crate) unsafe fn flip(new_free: *mut u8) {
     TENURED_FREE = new_free;
 }
 
-/// Live bytes currently occupied in the active semispace (`TENURED_FREE - TENURED_FROM_BASE`).
+/// Allocated bytes in the nursery plus active tenured space, including garbage
+/// not yet reclaimed. Excludes the spare tenured space.
 ///
 /// Test/diagnostic hook (not part of the ABI): lets the GC tests observe heap
 /// occupancy drop after a collection reclaims dead objects.
 #[doc(hidden)]
 pub fn heap_used() -> usize {
     // SAFETY: by-value reads of the allocator statics on the single runtime
-    // thread. Returns 0 before init (both null).
+    // thread. Returns 0 before init or after shutdown.
     unsafe {
         if TENURED_FROM_BASE.is_null() {
             0
         } else {
-            (TENURED_FREE as usize) - (TENURED_FROM_BASE as usize)
+            (TENURED_FREE as usize) - (TENURED_FROM_BASE as usize) + (NURSERY_FREE as usize)
+                - (NURSERY_BASE as usize)
         }
     }
+}
+
+/// Total backing heap capacity, including the nursery and both tenured semispaces.
+/// Returns zero when the heap is uninitialized. Not part of the ABI.
+#[doc(hidden)]
+pub fn heap_size() -> usize {
+    // SAFETY: by-value read on the single runtime thread.
+    unsafe { HEAP_LAYOUT.map_or(0, |layout| layout.size()) }
 }
 
 #[cfg(test)]

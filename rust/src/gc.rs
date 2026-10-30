@@ -1,20 +1,21 @@
-//! GC operations (`runtime-abi.md` §3.4) — the WS-2 reference **Cheney
-//! two-space copying collector**.
+//! Generational copying GC (`runtime-abi.md` §3.4) with immediate promotion.
 //!
-//! `lo_gc_write_barrier` is **provided** as a bare store — the correct
-//! non-generational barrier (Cheney's semispace, mark-compact) out of the box,
-//! and left untouched here (runbook WS-2 §2.6). `lo_gc_collect` performs a flip,
-//! a root scan, and a Cheney scan over the to-space (runbook WS-2 §2.4); the
-//! allocator's OOM path (`crate::alloc`) drives it.
+//! Minor collections copy nursery survivors into the active tenured tail,
+//! tracing shadow-stack roots and a HashSet of remembered old objects. Major
+//! collections trace the nursery and active tenured space into the spare tenured
+//! space, then flip. Both use a Cheney scan and leave the nursery empty.
 //!
-//! ## Forwarding-flag bit (decision (C))
+//! `lo_gc_collect` forces a major collection. Allocation failure calls
+//! `collect(false)`, which chooses a minor only when all used nursery bytes
+//! could fit in the active tenured tail, conservatively assuming all survive.
+//!
+//! ## Forwarding flag
 //!
 //! Bit 0 of `gc_bits` (`GC_FORWARDED_BIT == 0b1`) is the **forwarding flag**: set
-//! on a from-space object once it has been evacuated, at which point its
-//! `class_descriptor` slot holds the new to-space address instead of a descriptor
-//! pointer (the tombstone). The bit is collector-private — no two menu collectors
-//! run on one heap — so it needs no ABI pin. All three skeletons (Rust / Zig /
-//! C++) use this same bit so cross-skeleton header encoding stays byte-identical.
+//! on a source object once evacuated. Its `class_descriptor` slot then holds
+//! the destination address (a tombstone). Only the source is marked; the copy
+//! retains its descriptor and a clear forwarding flag. This bit is private to
+//! the collector.
 
 use std::cell::RefCell;
 use std::collections::HashSet;
@@ -24,8 +25,8 @@ use crate::object::{
     shadow_frame_roots_offset, string_data_offset, ClassDescriptor, Object, StringObject,
 };
 
-// satisfying rust ownership rules; hard to make a mutable static variable under ownership rules,
-// declaring it thread local satisfies the compiler. Runtime is single threaded
+// Old objects that may contain nursery pointers. All runtime calls, including
+// barrier writes and collections, must occur on the same single runtime thread.
 thread_local! {
     static REMEMBERED_SET: RefCell<HashSet<*mut Object>> =
         RefCell::new(HashSet::new());
@@ -44,14 +45,13 @@ impl Region {
     }
 }
 
-/// Forwarding-flag bit in `gc_bits` (decision (C)). See module docs.
+/// Forwarding-flag bit in `gc_bits`. See module docs.
 pub(crate) const GC_FORWARDED_BIT: u32 = 0b1;
 
-/// Pointer-store write barrier. Non-generational implementation: a bare store of
-/// `value` into the pointer field at `obj + field_offset` (`runtime-abi.md` §3.4).
-/// Codegen emits a call to this at *every* pointer store, which makes the choice
-/// of collector a runtime-only decision. Correct as-is for Cheney; left untouched
-/// (runbook WS-2 §2.6).
+/// Record `obj` in the remembered set for an active-tenured-to-nursery write,
+/// then store `value` at `obj + field_offset` (`runtime-abi.md` §3.4).
+/// Codegen calls this for every heap pointer-field store. Minor collection scans
+/// all pointer fields of each remembered object, not just the modified field.
 ///
 /// # Safety
 /// `obj` must point at a valid object with a pointer-typed field at
@@ -71,15 +71,14 @@ pub unsafe extern "C" fn lo_gc_write_barrier(
     *slot = value;
 }
 
-/// Force a collection (`runtime-abi.md` §3.4): a Cheney flip-and-scan cycle.
-/// Reachable objects are copied to the inactive semispace with their interior
-/// pointers and the shadow-stack roots rewritten to the new addresses;
-/// unreachable objects are reclaimed when the old space is abandoned.
+/// Force a major collection (`runtime-abi.md` §3.4). Copy reachable nursery and
+/// active tenured objects into the spare tenured space, rewriting roots and
+/// interior pointers, then flip and reset the nursery.
 #[no_mangle]
 pub extern "C" fn lo_gc_collect() {
-    // SAFETY: single-threaded runtime; the heap is initialized (a collect before
-    // `heap_init` walks an empty root set and flips empty semispaces — a no-op).
-    unsafe { collect() }
+    // SAFETY: called on the single runtime thread with initialized heap state
+    // and valid shadow-stack roots.
+    unsafe { collect(true) }
 }
 
 #[inline]
@@ -88,13 +87,13 @@ const fn align8(n: usize) -> usize {
 }
 
 /// True byte size of a heap object — the count `forward` copies and the stride
-/// `scan` advances by (runbook WS-2 §2.2). Strings are variable-size: their inline
+/// `scan` advances by. Strings are variable-size: their inline
 /// UTF-8 tail starts at `offset_of(StringObject, data)` (= 20 on 64-bit), **not**
 /// `size_of` — the offset-of-not-size-of rule (`runtime-abi.md` §2.2).
 ///
 /// # Safety
 /// `p` must point at a valid object whose `class_descriptor` is intact (a live
-/// from-space object before its tombstone is installed, or a to-space copy).
+/// source object before its tombstone is installed, or a destination copy).
 unsafe fn object_size(p: *mut Object) -> usize {
     let class = (*p).class_descriptor;
     if core::ptr::eq(class, &LO_STRING_CLASS) {
@@ -105,23 +104,26 @@ unsafe fn object_size(p: *mut Object) -> usize {
     }
 }
 
-/// Evacuate `p` from the from-space `[from_base, from_limit)` into the to-space,
-/// bumping `free` (runbook WS-2 §2.3). Returns `p`'s new address. Null and
-/// non-from-space (immortal / `.rodata`, e.g. `LO_EMPTY_STRING`) pointers are
-/// returned untouched — the range-check is what keeps immortal objects safe with
-/// no special case. An already-evacuated object (forwarding bit set) returns the
-/// new address stored in its clobbered `class_descriptor` slot.
+/// Evacuate `p` if it lies in a source region, bumping `free` after checking
+/// destination capacity. Abort on overflow. Null and pointers outside the source
+/// regions (including static objects and, during minors, old objects) are
+/// unchanged. Already-forwarded objects return their tombstone's address.
 ///
 /// Order matters: the size is read and the bytes copied **before** the original's
 /// `class_descriptor` is overwritten, because both reads need the intact
-/// descriptor. The copy carries the intact descriptor into to-space with the
+/// descriptor. The copy carries the intact descriptor into the destination with the
 /// forwarding flag still clear; only the original becomes a tombstone.
 ///
 /// # Safety
-/// `p` is null or a valid object pointer. `free` points at enough room in to-space
-/// for the largest live object. Single-threaded.
-unsafe fn forward(p: *mut Object, regions: &[Region], free: &mut *mut u8) -> *mut Object {
-    // if it is not any "from" space, return p
+/// `p` is null or a valid object pointer. Source regions contain valid objects;
+/// `[free, destination_limit)` is writable destination storage disjoint from
+/// them. Destination capacity is checked before copying. Single-threaded.
+unsafe fn forward(
+    p: *mut Object,
+    regions: &[Region],
+    free: &mut *mut u8,
+    destination_limit: *mut u8,
+) -> *mut Object {
     if p.is_null() || !regions.iter().any(|r| r.contains(p)) {
         return p;
     }
@@ -133,6 +135,10 @@ unsafe fn forward(p: *mut Object, regions: &[Region], free: &mut *mut u8) -> *mu
     }
     let n = object_size(p);
     let dst = *free;
+    let remaining = (destination_limit as usize).checked_sub(dst as usize);
+    if dst.is_null() || remaining.is_none_or(|remaining| n > remaining) {
+        crate::abort::runtime_abort("lo_alloc: out of memory", 137);
+    }
     core::ptr::copy_nonoverlapping(addr, dst, n);
     // Install the tombstone in the *original* — after the copy, so the to-space
     // copy keeps the intact descriptor and a clear forwarding flag.
@@ -142,89 +148,29 @@ unsafe fn forward(p: *mut Object, regions: &[Region], free: &mut *mut u8) -> *mu
     dst as *mut Object
 }
 
-/// One Cheney collection cycle (runbook WS-2 §2.4).
+/// Collect with immediate promotion; `force_major` bypasses minor selection.
 ///
 /// # Safety
-/// Single-threaded; the allocator statics describe a valid two-semispace heap (or
-/// a null/uninitialized heap, in which case both spaces are empty and this is a
-/// no-op).
-unsafe fn collect() {
-    let (tenure_from_base, tenure_from_limit) = crate::alloc::tenure_from_space();
-    let (nursery_base, nursery_limit) = crate::alloc::nursery_space();
-    let to_base = crate::alloc::to_space_base();
-    let mut free = to_base;
-    let mut scan = to_base;
-
-    // 1–2. Scan the root set: every slot of every shadow-stack frame, walking
-    // `current_frame` -> `parent` to null (ABI §3.3). The shadow stack is the
-    // complete root set.
-    let nursery_region = Region {
-        base: nursery_base as usize,
-        limit: nursery_limit as usize,
-    };
-    let tenure_region = Region {
-        base: tenure_from_base as usize,
-        limit: tenure_from_limit as usize,
-    };
-    let mut frame = crate::shadow_stack::current_frame();
-    while !frame.is_null() {
-        let num = (*frame).num_roots as usize;
-        let roots_base = (frame as *mut u8).add(shadow_frame_roots_offset());
-        for i in 0..num {
-            let slot = roots_base.add(i * core::mem::size_of::<*mut Object>()) as *mut *mut Object;
-            *slot = forward(*slot, from_base, from_limit, &mut free);
-        }
-        frame = (*frame).parent;
-    }
-
-    // 3. Cheney loop: scan copied objects in to-space, forwarding each pointer
-    // field, until `scan` catches `free`. Strings have `pointer_count == 0`, so
-    // they only advance `scan` — but `object_size` still uses the variable-size
-    // branch to advance correctly.
-    while scan < free {
-        let obj = scan as *mut Object;
-        let class = (*obj).class_descriptor;
-        let count = (*class).pointer_count as usize;
-        let offsets = (*class).pointer_offsets;
-        for i in 0..count {
-            let off = *offsets.add(i) as usize;
-            let slot = (obj as *mut u8).add(off) as *mut *mut Object;
-            *slot = forward(*slot, from_base, from_limit, &mut free);
-        }
-        scan = scan.add(object_size(obj));
-    }
-
-    // 4. Commit: swap the semispace roles; the old from-space is now free.
-    crate::alloc::flip(free);
-
-    // Debug instrumentation (off unless `LO_GC_POISON` is set): scribble the
-    // just-abandoned from-space with a poison byte. Survivors were already copied
-    // out to the new from-space, so this only clobbers garbage and tombstones —
-    // but it turns any *stale* pointer (one the collector did not relocate because
-    // it was not a registered root) into a deterministic read of `0xEFEFEFEF…`
-    // instead of its possibly-still-intact old bytes. That makes a missing
-    // GC root a hard failure rather than a flaky one (see the WS-11 GC-rooting
-    // stress test). Not part of the ABI; zero cost when disabled.
-    if poison_enabled() {
-        let len = (from_limit as usize) - (from_base as usize);
-        core::ptr::write_bytes(from_base, 0xEF, len);
-    }
-}
-
-// temp name
-unsafe fn collect_new() {
+/// The heap and shadow-stack roots must be valid on the single runtime thread.
+/// All old-to-young pointer stores must have passed through the write barrier.
+pub(crate) unsafe fn collect(force_major: bool) {
     let (tenure_from_base, tenure_from_limit) = crate::alloc::tenure_from_space();
     let (nursery_base, nursery_limit) = crate::alloc::nursery_space();
     let nursery_free = crate::alloc::nursery_free();
     let tenure_free = crate::alloc::tenure_free();
-    let to_base = crate::alloc::to_space_base();
+    let (to_base, to_limit) = crate::alloc::to_space();
 
-    // check if nursery could fit in current tenured from space
+    // Conservatively reserve room for every used nursery byte, not just survivors.
     let nursery_size = nursery_free as usize - nursery_base as usize;
     let tenure_size_free = tenure_from_limit as usize - tenure_free as usize;
-    let major_alloc = nursery_size > tenure_size_free;
+    let major_alloc = force_major || nursery_size > tenure_size_free;
+    let destination_limit = if major_alloc {
+        to_limit
+    } else {
+        tenure_from_limit
+    };
 
-    // decide where to copy from and to depending on major or minor allocation
+    // Majors evacuate both generations into the spare; minors append to old.
     let (from_regions, mut free) = if major_alloc {
         (
             vec![
@@ -256,7 +202,7 @@ unsafe fn collect_new() {
         for i in 0..num {
             let slot = roots_base.add(i * core::mem::size_of::<*mut Object>()) as *mut *mut Object;
             if major_alloc || crate::alloc::in_nursery(*slot) {
-                *slot = forward(*slot, &from_regions, &mut free);
+                *slot = forward(*slot, &from_regions, &mut free, destination_limit);
             }
         }
         frame = (*frame).parent;
@@ -269,13 +215,13 @@ unsafe fn collect_new() {
                 for i in 0..(*class).pointer_count as usize {
                     let off = *(*class).pointer_offsets.add(i) as usize;
                     let slot = (obj as *mut u8).add(off) as *mut *mut Object;
-                    *slot = forward(*slot, &from_regions, &mut free);
+                    *slot = forward(*slot, &from_regions, &mut free, destination_limit);
                 }
             }
         })
     }
 
-    // 3. Cheney loop: scan copied objects in to-space, forwarding each pointer
+    // Cheney scan of the destination tail: forward each copied object's pointer
     // field, until `scan` catches `free`. Strings have `pointer_count == 0`, so
     // they only advance `scan` — but `object_size` still uses the variable-size
     // branch to advance correctly.
@@ -287,7 +233,7 @@ unsafe fn collect_new() {
         for i in 0..count {
             let off = *offsets.add(i) as usize;
             let slot = (obj as *mut u8).add(off) as *mut *mut Object;
-            *slot = forward(*slot, &from_regions, &mut free);
+            *slot = forward(*slot, &from_regions, &mut free, destination_limit);
         }
         scan = scan.add(object_size(obj));
     }
@@ -297,13 +243,29 @@ unsafe fn collect_new() {
     } else {
         crate::alloc::set_tenure_free(free);
     }
+    if poison_enabled() {
+        if !nursery_base.is_null() {
+            core::ptr::write_bytes(
+                nursery_base,
+                0xEF,
+                nursery_limit as usize - nursery_base as usize,
+            );
+        }
+        if major_alloc && !tenure_from_base.is_null() {
+            core::ptr::write_bytes(
+                tenure_from_base,
+                0xEF,
+                tenure_from_limit as usize - tenure_from_base as usize,
+            );
+        }
+    }
     crate::alloc::reset_nursery();
     REMEMBERED_SET.with_borrow_mut(|set| set.clear());
 }
 
-/// Whether `LO_GC_POISON` requests poisoning the abandoned from-space after each
-/// collection (debug aid; see `collect`). Read once and cached. Always false on
-/// freestanding WASM (no environment).
+/// Whether `LO_GC_POISON` requests poisoning evacuated regions: the nursery
+/// after every collection and the former active tenured space after majors.
+/// Read once and cached; freestanding WASM has no environment.
 fn poison_enabled() -> bool {
     use std::sync::OnceLock;
     static POISON: OnceLock<bool> = OnceLock::new();
@@ -316,7 +278,7 @@ fn poison_enabled() -> bool {
 
 #[cfg(test)]
 mod tests {
-    //! Cheney collector tests (runbook WS-2 §3, step A.4). Run in-crate so they
+    //! Generational copying collector tests. Run in-crate so they
     //! can reach the internal string allocator and heap-occupancy hook.
     //!
     //! The runtime is process-global single-threaded state, so these tests
@@ -390,6 +352,79 @@ mod tests {
     }
     unsafe fn get_field(obj: *mut Object, off: usize) -> *mut Object {
         *((obj as *mut u8).add(off) as *mut *mut Object)
+    }
+
+    #[test]
+    fn minor_repairs_remembered_old_to_young_field() {
+        with_runtime(Some("4096"), || unsafe {
+            let mut frame = TestFrame::<1>::new();
+            lo_push_frame(frame.as_frame());
+            frame.roots[0] = lo_alloc(&NODE_CLASS);
+            super::collect(false);
+            let old = frame.roots[0];
+            assert!(crate::alloc::in_tenure(old));
+
+            let young = lo_alloc(&NODE_CLASS);
+            super::lo_gc_write_barrier(old, 16, young);
+            super::collect(false);
+            assert_eq!(frame.roots[0], old);
+            let promoted = get_field(old, 16);
+            assert_ne!(promoted, young);
+            assert!(crate::alloc::in_tenure(promoted));
+            assert_eq!((*promoted).class_descriptor, &NODE_CLASS as *const _);
+            assert_eq!(heap_used(), 48);
+            assert_eq!(
+                crate::alloc::nursery_free(),
+                crate::alloc::nursery_space().0
+            );
+            super::REMEMBERED_SET.with_borrow(|set| assert!(set.is_empty()));
+            lo_pop_frame();
+        });
+    }
+
+    #[test]
+    fn shared_cycle_survives_minor_and_major() {
+        with_runtime(None, || unsafe {
+            let mut frame = TestFrame::<2>::new();
+            lo_push_frame(frame.as_frame());
+            let a = lo_alloc(&NODE_CLASS);
+            let b = lo_alloc(&NODE_CLASS);
+            set_field(a, 16, b);
+            set_field(b, 16, a);
+            frame.roots = [a, a];
+            for force_major in [false, true] {
+                let previous = frame.roots[0];
+                super::collect(force_major);
+                let moved = frame.roots[0];
+                assert_ne!(moved, previous);
+                assert_eq!(frame.roots[1], moved);
+                assert_eq!(get_field(get_field(moved, 16), 16), moved);
+                assert_eq!(heap_used(), 48);
+            }
+            lo_pop_frame();
+        });
+    }
+
+    #[test]
+    fn explicit_major_reclaims_dead_tenured_objects() {
+        with_runtime(Some("4096"), || unsafe {
+            assert_eq!(crate::alloc::heap_size(), 4096);
+            let mut frame = TestFrame::<2>::new();
+            lo_push_frame(frame.as_frame());
+            frame.roots[0] = lo_alloc(&NODE_CLASS);
+            frame.roots[1] = lo_alloc(&NODE_CLASS);
+            assert_eq!(heap_used(), 48);
+            super::collect(false);
+            frame.roots[1] = core::ptr::null_mut();
+            let previous = frame.roots[0];
+            super::collect(false);
+            assert_eq!(heap_used(), 48);
+            lo_gc_collect();
+            assert_eq!(heap_used(), 24);
+            assert_ne!(frame.roots[0], previous);
+            assert_eq!((*frame.roots[0]).class_descriptor, &NODE_CLASS as *const _);
+            lo_pop_frame();
+        });
     }
 
     // (i) A known live graph survives: reachable objects are preserved with
@@ -512,12 +547,12 @@ mod tests {
         });
     }
 
-    // (v) Allocation pressure past one semispace triggers GC through lo_alloc's
-    // OOM path and continues; only a genuine live-set overflow would abort.
+    // (v) Filling the nursery triggers collection through lo_alloc's no-fit
+    // path, allowing allocation to continue while the rooted node survives.
     #[test]
     fn allocation_pressure_triggers_gc() {
-        // Total 4 KiB -> 2 KiB per semispace (~85 nodes). 600 allocations of dead
-        // nodes force many collections; the single rooted node survives them all.
+        // A 4 KiB heap has a 1 KiB nursery and two 1.5 KiB tenured spaces.
+        // 600 dead-node allocations force repeated nursery collections.
         with_runtime(Some("4096"), || unsafe {
             let mut frame = TestFrame::<1>::new();
             lo_push_frame(frame.as_frame());
