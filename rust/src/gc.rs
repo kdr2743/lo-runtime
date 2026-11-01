@@ -94,7 +94,7 @@ const fn align8(n: usize) -> usize {
 /// # Safety
 /// `p` must point at a valid object whose `class_descriptor` is intact (a live
 /// source object before its tombstone is installed, or a destination copy).
-unsafe fn object_size(p: *mut Object) -> usize {
+pub(crate) unsafe fn object_size(p: *mut Object) -> usize {
     let class = (*p).class_descriptor;
     if core::ptr::eq(class, &LO_STRING_CLASS) {
         let so = p as *const StringObject;
@@ -195,6 +195,8 @@ pub(crate) unsafe fn collect(force_major: bool) {
         )
     };
     let mut scan = free;
+    #[cfg(feature = "gc-debug")]
+    let (copied_start, used_before) = (free, crate::alloc::heap_used());
     let mut frame = crate::shadow_stack::current_frame();
     while !frame.is_null() {
         let num = (*frame).num_roots as usize;
@@ -243,37 +245,25 @@ pub(crate) unsafe fn collect(force_major: bool) {
     } else {
         crate::alloc::set_tenure_free(free);
     }
-    if poison_enabled() {
-        if !nursery_base.is_null() {
-            core::ptr::write_bytes(
-                nursery_base,
-                0xEF,
-                nursery_limit as usize - nursery_base as usize,
-            );
-        }
-        if major_alloc && !tenure_from_base.is_null() {
-            core::ptr::write_bytes(
-                tenure_from_base,
-                0xEF,
-                tenure_from_limit as usize - tenure_from_base as usize,
-            );
-        }
-    }
     crate::alloc::reset_nursery();
     REMEMBERED_SET.with_borrow_mut(|set| set.clear());
+
+    // gc-debug: poison freed space, verify the heap, update stats and log.
+    #[cfg(feature = "gc-debug")]
+    crate::gc_debug::after_collection(crate::gc_debug::CollectSummary {
+        major: major_alloc,
+        explicit: force_major,
+        used_before,
+        copied_start,
+        nursery: (nursery_base, nursery_limit),
+        freed_tenure: major_alloc.then_some((tenure_from_base, tenure_from_limit)),
+    });
 }
 
-/// Whether `LO_GC_POISON` requests poisoning evacuated regions: the nursery
-/// after every collection and the former active tenured space after majors.
-/// Read once and cached; freestanding WASM has no environment.
-fn poison_enabled() -> bool {
-    use std::sync::OnceLock;
-    static POISON: OnceLock<bool> = OnceLock::new();
-    *POISON.get_or_init(|| {
-        std::env::var("LO_GC_POISON")
-            .map(|v| !v.is_empty() && v != "0")
-            .unwrap_or(false)
-    })
+/// Number of entries in the remembered set (gc-debug heap checker).
+#[cfg(feature = "gc-debug")]
+pub(crate) fn remembered_len() -> usize {
+    REMEMBERED_SET.with_borrow(|set| set.len())
 }
 
 #[cfg(test)]
@@ -573,5 +563,177 @@ mod tests {
 
             lo_pop_frame();
         });
+    }
+
+    // --- gc-debug: poisoning, heap checker, stats ---------------------------
+
+    #[cfg(feature = "gc-debug")]
+    mod debug {
+        use super::*;
+        use crate::gc_debug::{gc_debug_stats, verify_heap, POISON_BYTE};
+
+        /// Root one old (tenured) node, run `f` with its frame, pop the frame.
+        unsafe fn with_tenured_root(f: impl FnOnce(&mut TestFrame<1>, *mut Object)) {
+            let mut frame = TestFrame::<1>::new();
+            lo_push_frame(frame.as_frame());
+            frame.roots[0] = lo_alloc(&NODE_CLASS);
+            super::super::collect(false);
+            let old = frame.roots[0];
+            f(&mut frame, old);
+            lo_pop_frame();
+        }
+
+        #[test]
+        fn healthy_heap_verifies_and_free_space_is_poisoned() {
+            with_runtime(Some("4096"), || unsafe {
+                with_tenured_root(|_, old| {
+                    assert!(crate::alloc::in_tenure(old));
+                    assert_eq!(verify_heap(), Ok(()));
+                    let (base, limit) = crate::alloc::nursery_space();
+                    let nursery = core::slice::from_raw_parts(base, limit as usize - base as usize);
+                    assert!(nursery.iter().all(|&b| b == POISON_BYTE));
+                });
+            });
+        }
+
+        #[test]
+        fn stale_pointer_into_evacuated_nursery_reads_poison() {
+            with_runtime(Some("4096"), || unsafe {
+                let mut frame = TestFrame::<1>::new();
+                lo_push_frame(frame.as_frame());
+                let before = lo_alloc(&NODE_CLASS);
+                frame.roots[0] = before;
+                super::super::collect(false);
+                assert_ne!(frame.roots[0], before);
+                // `before` is the stale pre-move address: it must not look live.
+                let stale = (*before).class_descriptor as usize;
+                assert_eq!(
+                    stale,
+                    usize::from_ne_bytes([POISON_BYTE; size_of::<usize>()])
+                );
+                lo_pop_frame();
+            });
+        }
+
+        #[test]
+        fn checker_rejects_field_pointing_into_the_heap_but_not_at_an_object() {
+            with_runtime(Some("4096"), || unsafe {
+                with_tenured_root(|_, old| {
+                    let bogus = crate::alloc::nursery_space().0 as *mut Object;
+                    set_field(old, 16, bogus);
+                    let err = verify_heap().unwrap_err();
+                    assert!(err.contains("not at a live object"), "{err}");
+                    set_field(old, 16, core::ptr::null_mut());
+                    assert_eq!(verify_heap(), Ok(()));
+                });
+            });
+        }
+
+        #[test]
+        fn checker_rejects_bad_root() {
+            with_runtime(Some("4096"), || unsafe {
+                with_tenured_root(|frame, old| {
+                    // One byte into the object: inside the heap, not an object start.
+                    frame.roots[0] = (old as *mut u8).add(8) as *mut Object;
+                    let err = verify_heap().unwrap_err();
+                    assert!(err.contains("shadow-stack root"), "{err}");
+                    frame.roots[0] = old;
+                    assert_eq!(verify_heap(), Ok(()));
+                });
+            });
+        }
+
+        #[test]
+        fn checker_rejects_unpoisoned_free_space() {
+            with_runtime(Some("4096"), || unsafe {
+                with_tenured_root(|_, _| {
+                    let tail = crate::alloc::tenure_free();
+                    *tail = 0;
+                    let err = verify_heap().unwrap_err();
+                    assert!(err.contains("tenured tail"), "{err}");
+                    *tail = POISON_BYTE;
+                    assert_eq!(verify_heap(), Ok(()));
+                });
+            });
+        }
+
+        #[test]
+        fn checker_rejects_bad_descriptor_pointer() {
+            with_runtime(Some("4096"), || unsafe {
+                with_tenured_root(|_, old| {
+                    (*old).class_descriptor = core::ptr::null();
+                    let err = verify_heap().unwrap_err();
+                    assert!(err.contains("bad class descriptor"), "{err}");
+                    (*old).class_descriptor = &NODE_CLASS;
+                    assert_eq!(verify_heap(), Ok(()));
+                });
+            });
+        }
+
+        #[test]
+        fn checker_rejects_leftover_remembered_set_entry() {
+            with_runtime(Some("4096"), || unsafe {
+                with_tenured_root(|_, old| {
+                    super::super::REMEMBERED_SET.with_borrow_mut(|set| {
+                        set.insert(old);
+                    });
+                    let err = verify_heap().unwrap_err();
+                    assert!(err.contains("remembered set"), "{err}");
+                    super::super::REMEMBERED_SET.with_borrow_mut(|set| set.clear());
+                    assert_eq!(verify_heap(), Ok(()));
+                });
+            });
+        }
+
+        #[test]
+        fn stats_count_collections_and_survivors() {
+            with_runtime(Some("4096"), || unsafe {
+                let mut frame = TestFrame::<2>::new();
+                lo_push_frame(frame.as_frame());
+                frame.roots[0] = lo_alloc(&NODE_CLASS);
+                frame.roots[1] = lo_alloc(&NODE_CLASS);
+                let _dead = lo_alloc(&NODE_CLASS);
+                assert_eq!(gc_debug_stats().collections, 0);
+
+                super::super::collect(false);
+                let minor = gc_debug_stats();
+                assert_eq!((minor.collections, minor.minors, minor.majors), (1, 1, 0));
+                assert_eq!(minor.copied_objects, 2);
+                assert_eq!(minor.reclaimed_bytes, 24);
+
+                lo_gc_collect();
+                let major = gc_debug_stats();
+                assert_eq!((major.collections, major.minors, major.majors), (2, 1, 1));
+                assert_eq!(major.copied_objects, 4);
+                // Both roots survived (and keeps the root stores observably live).
+                assert!(frame.roots.iter().all(|r| !r.is_null()));
+                lo_pop_frame();
+            });
+        }
+
+        #[test]
+        fn cycles_strings_and_empty_string_pass_the_checker_under_pressure() {
+            with_runtime(Some("8192"), || unsafe {
+                let mut frame = TestFrame::<2>::new();
+                lo_push_frame(frame.as_frame());
+                let a = lo_alloc(&NODE_CLASS);
+                let b = lo_alloc(&NODE_CLASS);
+                set_field(a, 16, b);
+                set_field(b, 16, a);
+                frame.roots[0] = a;
+                let empty = &LO_EMPTY_STRING as *const StringObject as *mut Object;
+                let holder = lo_alloc(&NODE_CLASS);
+                set_field(holder, 16, empty);
+                frame.roots[1] = holder;
+                // The checker runs inside every one of these collections.
+                for i in 0..400 {
+                    let _ = bump_alloc_string(i % 40);
+                    let _ = lo_alloc(&NODE_CLASS);
+                }
+                assert!(gc_debug_stats().collections > 2);
+                assert_eq!(get_field(frame.roots[1], 16), empty);
+                lo_pop_frame();
+            });
+        }
     }
 }

@@ -84,6 +84,12 @@ pub(crate) fn heap_init() {
         if base.is_null() {
             std::alloc::handle_alloc_error(layout);
         }
+        // gc-debug: all free space starts poisoned (see `gc_debug`).
+        #[cfg(feature = "gc-debug")]
+        {
+            ptr::write_bytes(base, crate::gc_debug::POISON_BYTE, region);
+            crate::gc_debug::reset_stats();
+        }
         HEAP_BASE = base;
         HEAP_LAYOUT = Some(layout);
         NURSERY_BASE = base;
