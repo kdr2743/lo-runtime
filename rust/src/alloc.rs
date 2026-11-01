@@ -1,8 +1,10 @@
 //! Bump allocator backing `lo_alloc` (`runtime-abi.md` §3.1).
 //!
 //! One backing allocation contains a nursery followed by two equal tenured
-//! Cheney semispaces. The nursery targets one quarter of the aligned heap;
-//! rounding leftovers go to it so the tenured spaces remain equal.
+//! Cheney semispaces. The nursery targets `1 / NURSERY_DIVISOR` of the aligned
+//! heap; rounding leftovers go to it so the tenured spaces remain equal. Live
+//! data can fill one tenured space, so a smaller nursery leaves more of the heap
+//! usable (about `(1 - 1/NURSERY_DIVISOR) / 2`, versus 1/2 for plain Cheney).
 //!
 //! Allocation bumps through the nursery. On a no-fit, `lo_alloc` collects and
 //! retries once; failure to fit aborts (exit 137 native / `unreachable` WASM).
@@ -31,6 +33,10 @@ const DEFAULT_HEAP_SIZE: usize = 16 * 1024 * 1024;
 /// All allocations (and each semispace base) are aligned to this; covers
 /// `Object`'s 8-byte pointer field with headroom.
 const HEAP_ALIGN: usize = 16;
+/// The nursery targets `1 / NURSERY_DIVISOR` of the heap (at least one alignment
+/// unit). The only knob for the nursery/tenured split: `heap_partition` and its
+/// tests are written in terms of it, so changing it needs no other edit.
+const NURSERY_DIVISOR: usize = 16;
 
 /// Base of the whole backing region (for `dealloc`); null when uninitialized.
 static mut HEAP_BASE: *mut u8 = ptr::null_mut();
@@ -62,7 +68,7 @@ fn heap_partition(total: usize) -> (usize, usize) {
         total_units >= 3,
         "heap requires at least three alignment units"
     );
-    let target_nursery_units = (total_units / 4).max(1);
+    let target_nursery_units = (total_units / NURSERY_DIVISOR).max(1);
     let tenured_units = (total_units - target_nursery_units) / 2;
     let nursery_units = total_units - 2 * tenured_units;
     (nursery_units * HEAP_ALIGN, tenured_units * HEAP_ALIGN)
@@ -362,6 +368,14 @@ pub fn heap_used() -> usize {
     }
 }
 
+/// Nursery capacity in bytes. Zero when the heap is uninitialized. Not part of
+/// the ABI; lets tests size their allocations against the real nursery.
+#[doc(hidden)]
+pub fn nursery_size() -> usize {
+    // SAFETY: by-value reads on the single runtime thread.
+    unsafe { NURSERY_LIMIT as usize - NURSERY_BASE as usize }
+}
+
 /// Total backing heap capacity, including the nursery and both tenured semispaces.
 /// Returns zero when the heap is uninitialized. Not part of the ABI.
 #[doc(hidden)]
@@ -372,7 +386,7 @@ pub fn heap_size() -> usize {
 
 #[cfg(test)]
 mod tests {
-    use super::{heap_partition, HEAP_ALIGN};
+    use super::{heap_partition, HEAP_ALIGN, NURSERY_DIVISOR};
 
     #[test]
     fn minimum_heap_has_three_equal_regions() {
@@ -380,12 +394,31 @@ mod tests {
     }
 
     #[test]
-    fn odd_units_leave_remainder_in_nursery() {
-        assert_eq!(heap_partition(7 * HEAP_ALIGN), (HEAP_ALIGN, 3 * HEAP_ALIGN));
-        assert_eq!(
-            heap_partition(9 * HEAP_ALIGN),
-            (3 * HEAP_ALIGN, 3 * HEAP_ALIGN)
-        );
+    fn nursery_is_one_divisor_th_of_the_heap_and_remainder_goes_to_it() {
+        // Exact multiple: target nursery units = total / divisor.
+        let total_units = 4 * NURSERY_DIVISOR;
+        let (nursery, tenured) = heap_partition(total_units * HEAP_ALIGN);
+        assert_eq!(nursery, 4 * HEAP_ALIGN);
+        assert_eq!(tenured, (total_units - 4) / 2 * HEAP_ALIGN);
+
+        // An odd leftover unit cannot split across two tenured spaces, so the
+        // nursery absorbs it.
+        let total_units = 4 * NURSERY_DIVISOR + 1;
+        let (nursery, tenured) = heap_partition(total_units * HEAP_ALIGN);
+        let tenured_units = (total_units - 4) / 2;
+        assert_eq!(tenured, tenured_units * HEAP_ALIGN);
+        assert_eq!(nursery, (total_units - 2 * tenured_units) * HEAP_ALIGN);
+        assert!(nursery > 4 * HEAP_ALIGN, "the odd unit went to the nursery");
+    }
+
+    #[test]
+    fn tenured_spaces_hold_almost_half_the_heap() {
+        // The reason the nursery is small: live data can fill one tenured space.
+        // Cheney gets 50%; the generational layout must stay close to it.
+        for total in [4096, 65536, 1 << 20, 16 << 20] {
+            let (_, tenured) = heap_partition(total);
+            assert!(tenured * 100 >= total * 45, "{total}: tenured {tenured}");
+        }
     }
 
     #[test]

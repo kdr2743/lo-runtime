@@ -541,8 +541,8 @@ mod tests {
     // path, allowing allocation to continue while the rooted node survives.
     #[test]
     fn allocation_pressure_triggers_gc() {
-        // A 4 KiB heap has a 1 KiB nursery and two 1.5 KiB tenured spaces.
-        // 600 dead-node allocations force repeated nursery collections.
+        // A 4 KiB heap has a tiny nursery (a few dozen nodes at most), so 600
+        // dead-node allocations force repeated nursery collections.
         with_runtime(Some("4096"), || unsafe {
             let mut frame = TestFrame::<1>::new();
             lo_push_frame(frame.as_frame());
@@ -687,6 +687,39 @@ mod tests {
             assert_eq!((*promoted).class_descriptor, &NODE_CLASS as *const _);
             lo_pop_frame();
         });
+    }
+
+    // --- usable heap ------------------------------------------------------------
+
+    /// Live data can fill one tenured space, so most of one must be usable. Build
+    /// a rooted chain of nodes totalling 90% of a tenured space while allocating
+    /// through the real nursery/promotion/major path, then force a major and
+    /// check nothing was lost. (Running out of room would abort the process.)
+    #[test]
+    fn live_data_filling_most_of_a_tenured_space_survives() {
+        for heap in ["4096", "65536", "1048576"] {
+            with_runtime(Some(heap), || unsafe {
+                let (base, limit) = crate::alloc::tenure_from_space();
+                let nodes = (limit as usize - base as usize) * 9 / 10 / 24;
+                let mut frame = TestFrame::<1>::new();
+                lo_push_frame(frame.as_frame());
+                for _ in 0..nodes {
+                    let node = lo_alloc(&NODE_CLASS);
+                    super::lo_gc_write_barrier(node, 16, frame.roots[0]);
+                    frame.roots[0] = node;
+                }
+                lo_gc_collect();
+                assert_eq!(heap_used(), nodes * 24, "heap {heap}");
+
+                let (mut count, mut cur) = (0, frame.roots[0]);
+                while !cur.is_null() {
+                    count += 1;
+                    cur = get_field(cur, 16);
+                }
+                assert_eq!(count, nodes, "heap {heap}");
+                lo_pop_frame();
+            });
+        }
     }
 
     // --- gc-debug: poisoning, heap checker, stats ---------------------------

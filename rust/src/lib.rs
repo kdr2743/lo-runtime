@@ -63,7 +63,7 @@ pub use string_ops::{
 
 // Debug/test hooks (not part of the ABI).
 #[doc(hidden)]
-pub use alloc::{heap_size, heap_used};
+pub use alloc::{heap_size, heap_used, nursery_size};
 #[cfg(feature = "gc-debug")]
 #[doc(hidden)]
 pub use gc_debug::{gc_debug_stats, GcStats};
