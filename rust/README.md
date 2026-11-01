@@ -87,6 +87,8 @@ The selected implementation uses a Cheney nursery with Cheney tenured spaces,
 including promotion and a remembered-set write barrier. An object larger than the whole nursery is allocated
 directly in the tenured space (running a major collection first if it does not
 fit), so `lo_alloc` aborts with exit 137 only when a full collection cannot make
-room. String operations use
+room. The nursery is `1 / NURSERY_DIVISOR` of the heap (`NURSERY_DIVISOR = 16`
+in `src/alloc.rs`, the single knob for the split), which leaves each tenured space
+about 46.9% of the heap, close to plain Cheney's 50%. String operations use
 the internal variable-size allocator and register their object inputs as roots
 across any allocation that may trigger collection.
