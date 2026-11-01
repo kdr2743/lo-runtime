@@ -37,6 +37,31 @@ zeroing, shadow-stack push/pop, the `LO_EMPTY_STRING` singleton, bump-pointer
 advance), and an I/O round-trip that drives the print/read entry points through a
 child process (`src/bin/lo_io_probe.rs`).
 
+## Debugging the collector (`gc-debug`)
+
+```sh
+cargo test --features gc-debug
+cargo build --target wasm32-unknown-unknown --features gc-debug
+```
+
+The `gc-debug` cargo feature is off by default and works on both targets (a
+feature, not an env var, because wasm32 has no environment). When on:
+
+- **Poison.** The whole heap is filled with `0xEF` at init, and each collection
+  re-poisons what it frees (the nursery always; the old tenured space after a
+  major). Free space is always poison, so a stale pointer fails immediately.
+- **Heap checker.** After every collection the heap is walked and checked: valid
+  descriptors, no forwarding bits left, every pointer field and shadow-stack
+  root is null / a live tenured object start / outside the heap, free space is
+  poisoned, the remembered set is empty. A failure aborts with
+  `lo_gc_debug: heap check failed: <why>` (native exit 70, not an ABI code).
+- **Stats and log.** Counters are kept on both targets (`gc_debug_stats()`).
+  Native also logs one line per collection to stderr:
+  `[lo-gc] #3 minor trigger=alloc reclaimed=48 objects=2 used=24`
+  (`objects` = survivors copied; `trigger=explicit` means a forced collection).
+  WASM keeps counters only, since its stderr channels belong to abort messages
+  and program output.
+
 ## Layout
 
 ```
@@ -49,6 +74,7 @@ src/
 ├── init.rs           # lo_runtime_init / lo_runtime_shutdown
 ├── io.rs             # lo_print_* / lo_read_* / lo_println / lo_eof
 ├── gc.rs             # generational collector + remembered-set write barrier
+├── gc_debug.rs       # poison, heap checker, stats/log (feature `gc-debug`)
 ├── string_ops.rs     # UTF-8 string operations
 ├── cast.rs           # cast/instanceof implementation
 ├── abort.rs          # runtime abort paths + lo_abort_null_receiver
