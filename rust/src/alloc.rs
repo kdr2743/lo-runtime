@@ -6,6 +6,9 @@
 //!
 //! Allocation bumps through the nursery. On a no-fit, `lo_alloc` collects and
 //! retries once; failure to fit aborts (exit 137 native / `unreachable` WASM).
+//! An object larger than the whole nursery is allocated directly at the tail of
+//! the active tenured space; if that does not fit, a major collection runs
+//! first, so the abort happens only when a full collection cannot make room.
 //! Minor collections immediately promote survivors into the active tenured tail;
 //! major collections copy nursery and active tenured survivors into the spare.
 //!
@@ -137,33 +140,87 @@ pub(crate) fn heap_shutdown() {
     }
 }
 
-/// Carve `size` zero-initialized bytes from the nursery and stamp the header.
-/// On a no-fit, collect with automatic minor/major selection and retry once;
-/// abort (exit 137 native) if the request still does not fit.
+/// Carve `size` zero-initialized bytes and stamp the header: from the nursery,
+/// or straight from tenured space for an object larger than the nursery (see
+/// [`alloc_slot`]). On a no-fit, collect and retry once; abort (exit 137
+/// native) if the request still does not fit.
 ///
 /// # Safety
 /// `class` must point at a valid, live `ClassDescriptor`. `size` must be at least
 /// `size_of::<Object>()` so the header fits, and a multiple of 8.
 unsafe fn alloc_raw(size: usize, class: *const ClassDescriptor) -> *mut Object {
-    let bump = bump_if_fits(size);
-    let slot = if !bump.is_null() {
-        bump
-    } else {
-        // OOM path: collect, then retry the bump exactly once.
-        crate::gc::collect(false);
-        let retry = bump_if_fits(size);
-        if retry.is_null() {
-            crate::abort::runtime_abort("lo_alloc: out of memory", 137);
-        }
-        retry
-    };
-
+    let slot = alloc_slot(size);
     ptr::write_bytes(slot, 0, size);
     let obj = slot as *mut Object;
     (*obj).class_descriptor = class;
     (*obj).gc_bits = 0;
     (*obj).flags = 0;
     obj
+}
+
+/// Reserve `size` bytes for a new object, collecting if necessary; abort if
+/// the request cannot be satisfied even after a full collection.
+///
+/// An object larger than the whole nursery could never fit there, so it is
+/// allocated directly in the active tenured space ([`alloc_large`]). Such an
+/// object is born zeroed, so it holds no old-to-young pointer yet; every later
+/// pointer store into it goes through the write barrier, which records it
+/// because it lives in tenured space.
+unsafe fn alloc_slot(size: usize) -> *mut u8 {
+    if size > NURSERY_LIMIT as usize - NURSERY_BASE as usize {
+        return alloc_large(size);
+    }
+    let bump = bump_if_fits(size);
+    if !bump.is_null() {
+        return bump;
+    }
+    // OOM path: collect, then retry the bump exactly once. A collection
+    // empties the nursery and `size` fits in an empty one, so the retry only
+    // fails if `collect` itself aborted.
+    crate::gc::collect(false);
+    let retry = bump_if_fits(size);
+    if retry.is_null() {
+        crate::abort::runtime_abort("lo_alloc: out of memory", 137);
+    }
+    retry
+}
+
+/// Reserve `size` bytes at the tail of the active tenured space. On a no-fit,
+/// run a major collection (reclaiming dead tenured objects) and retry once;
+/// abort 137 if it still does not fit, i.e. when a full collection cannot make
+/// room.
+///
+/// # Safety
+/// Reads/writes the allocator statics on the single runtime thread.
+unsafe fn alloc_large(size: usize) -> *mut u8 {
+    let slot = bump_tenured_if_fits(size);
+    if !slot.is_null() {
+        return slot;
+    }
+    crate::gc::collect(true);
+    let retry = bump_tenured_if_fits(size);
+    if retry.is_null() {
+        crate::abort::runtime_abort("lo_alloc: out of memory", 137);
+    }
+    retry
+}
+
+/// Try to bump `size` bytes from the active tenured space. Null if it does not
+/// fit.
+///
+/// # Safety
+/// Reads/writes the allocator statics on the single runtime thread.
+unsafe fn bump_tenured_if_fits(size: usize) -> *mut u8 {
+    let free = TENURED_FREE;
+    debug_assert!(!free.is_null(), "heap must be initialized");
+    let Some(new_addr) = (free as usize).checked_add(size) else {
+        return ptr::null_mut();
+    };
+    if new_addr > TENURED_FROM_LIMIT as usize {
+        return ptr::null_mut();
+    }
+    TENURED_FREE = free.add(size);
+    free
 }
 
 /// Try to bump `size` bytes from the nursery. Return the carved slot on

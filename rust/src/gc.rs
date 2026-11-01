@@ -565,6 +565,130 @@ mod tests {
         });
     }
 
+    // --- large objects (bigger than the nursery) ------------------------------
+    //
+    // A 128 KiB heap has a nursery smaller than 40000 bytes (and tenured spaces
+    // larger than it), whichever nursery fraction is configured.
+
+    const LARGE_HEAP: &str = "131072";
+    /// Total object size of the large test class and string: 40000 bytes.
+    const LARGE_SIZE: usize = 40000;
+    static LARGE_PTR_OFFSETS: [u32; 1] = [16];
+    static LARGE_CLASS: ClassDescriptor = ClassDescriptor {
+        name: c"Large".as_ptr() as *const u8,
+        name_len: 5,
+        parent: core::ptr::null(),
+        instance_size: LARGE_SIZE as u32,
+        pointer_offsets: &LARGE_PTR_OFFSETS as *const u32,
+        pointer_count: 1,
+        vtable_size: 0,
+        vtable: core::ptr::null(),
+    };
+
+    /// A string whose total object size is exactly `LARGE_SIZE`, filled with a
+    /// position-dependent pattern.
+    unsafe fn large_string() -> *mut Object {
+        let len = LARGE_SIZE - string_data_offset();
+        let s = bump_alloc_string(len as u32);
+        let data = core::slice::from_raw_parts_mut((s as *mut u8).add(string_data_offset()), len);
+        for (i, b) in data.iter_mut().enumerate() {
+            *b = (i % 251) as u8;
+        }
+        s
+    }
+
+    unsafe fn assert_large_string_intact(s: *mut Object) {
+        let len = LARGE_SIZE - string_data_offset();
+        assert_eq!((*s).class_descriptor, &LO_STRING_CLASS as *const _);
+        assert_eq!((*(s as *const StringObject)).length as usize, len);
+        let data = core::slice::from_raw_parts((s as *const u8).add(string_data_offset()), len);
+        assert!(data.iter().enumerate().all(|(i, &b)| b == (i % 251) as u8));
+    }
+
+    #[test]
+    fn object_larger_than_nursery_is_allocated_in_tenure() {
+        with_runtime(Some(LARGE_HEAP), || unsafe {
+            let (nursery_base, nursery_limit) = crate::alloc::nursery_space();
+            assert!(LARGE_SIZE > nursery_limit as usize - nursery_base as usize);
+
+            let s = large_string();
+            assert!(
+                crate::alloc::in_tenure(s),
+                "large object goes straight to tenure"
+            );
+            assert_eq!(
+                crate::alloc::nursery_free(),
+                nursery_base,
+                "nursery untouched"
+            );
+            assert_eq!(heap_used(), LARGE_SIZE);
+            assert_large_string_intact(s);
+        });
+    }
+
+    #[test]
+    fn large_object_survives_minor_and_major_collections() {
+        with_runtime(Some(LARGE_HEAP), || unsafe {
+            let mut frame = TestFrame::<1>::new();
+            lo_push_frame(frame.as_frame());
+            frame.roots[0] = large_string();
+            let allocated = frame.roots[0];
+
+            super::collect(false);
+            assert_eq!(
+                frame.roots[0], allocated,
+                "minor never moves tenured objects"
+            );
+            assert_large_string_intact(frame.roots[0]);
+
+            lo_gc_collect();
+            assert_ne!(frame.roots[0], allocated, "major evacuates it");
+            assert_large_string_intact(frame.roots[0]);
+            assert_eq!(heap_used(), LARGE_SIZE);
+            lo_pop_frame();
+        });
+    }
+
+    #[test]
+    fn large_allocation_runs_a_major_when_tenure_is_full_of_garbage() {
+        with_runtime(Some(LARGE_HEAP), || unsafe {
+            let mut frame = TestFrame::<1>::new();
+            lo_push_frame(frame.as_frame());
+            // Dead once allocated: two of these cannot share one tenured space.
+            let _garbage = large_string();
+            let (tenure_base, tenure_limit) = crate::alloc::tenure_from_space();
+            assert!(2 * LARGE_SIZE > tenure_limit as usize - tenure_base as usize);
+
+            frame.roots[0] = large_string();
+            assert_eq!(heap_used(), LARGE_SIZE, "the major reclaimed the garbage");
+            assert_large_string_intact(frame.roots[0]);
+            lo_pop_frame();
+        });
+    }
+
+    #[test]
+    fn large_object_keeps_young_referent_alive_via_the_barrier() {
+        with_runtime(Some(LARGE_HEAP), || unsafe {
+            let mut frame = TestFrame::<1>::new();
+            lo_push_frame(frame.as_frame());
+            let large = lo_alloc(&LARGE_CLASS);
+            frame.roots[0] = large;
+            assert!(crate::alloc::in_tenure(large));
+
+            // The only path to `young` runs through the large (old) object.
+            let young = lo_alloc(&NODE_CLASS);
+            assert!(crate::alloc::in_nursery(young));
+            super::lo_gc_write_barrier(large, 16, young);
+
+            super::collect(false);
+            let promoted = get_field(frame.roots[0], 16);
+            assert_ne!(promoted, young);
+            assert!(crate::alloc::in_tenure(promoted));
+            assert_eq!((*promoted).class_descriptor, &NODE_CLASS as *const _);
+            lo_pop_frame();
+        });
+    }
+
     // --- gc-debug: poisoning, heap checker, stats ---------------------------
 
     #[cfg(feature = "gc-debug")]

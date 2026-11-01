@@ -237,3 +237,39 @@ fn negative_repeat_reports_count_and_exits_120() {
         "lo_string_repeat: negative count -7\n"
     );
 }
+
+/// Run the probe (`repeat("x", count)`) under `heap_size`, or the default heap.
+fn run_repeat_probe(count: &str, heap_size: Option<&str>) -> std::process::Output {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_lo_string_probe"));
+    command.arg(count);
+    match heap_size {
+        Some(size) => command.env("LO_HEAP_SIZE", size),
+        None => command.env_remove("LO_HEAP_SIZE"),
+    };
+    command.output().expect("run lo_string_probe")
+}
+
+#[test]
+fn string_larger_than_nursery_allocates_on_the_default_heap() {
+    // 5 MB exceeds the 16 MiB heap's nursery; it must still be allocatable.
+    let output = run_repeat_probe("5000000", None);
+    assert_eq!(output.status.code(), Some(0), "{output:?}");
+}
+
+#[test]
+fn string_larger_than_nursery_allocates_on_a_small_heap() {
+    let output = run_repeat_probe("20000", Some("65536"));
+    assert_eq!(output.status.code(), Some(0), "{output:?}");
+}
+
+#[test]
+fn string_larger_than_the_whole_heap_exits_137() {
+    let output = run_repeat_probe("1000000", Some("65536"));
+    assert_eq!(output.status.code(), Some(137));
+    // Under `gc-debug` the failed major collection logs lines first; the abort
+    // message is always the last line.
+    assert!(
+        String::from_utf8_lossy(&output.stderr).ends_with("lo_alloc: out of memory\n"),
+        "{output:?}"
+    );
+}
