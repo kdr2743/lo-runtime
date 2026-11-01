@@ -84,6 +84,9 @@ src/
 ## P3 implementation
 
 The selected implementation uses a Cheney nursery with Cheney tenured spaces,
-including promotion and a remembered-set write barrier. String operations use
+including promotion and a remembered-set write barrier. An object larger than the whole nursery is allocated
+directly in the tenured space (running a major collection first if it does not
+fit), so `lo_alloc` aborts with exit 137 only when a full collection cannot make
+room. String operations use
 the internal variable-size allocator and register their object inputs as roots
 across any allocation that may trigger collection.
