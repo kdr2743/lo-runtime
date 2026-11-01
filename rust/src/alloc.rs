@@ -1,11 +1,16 @@
 //! Bump allocator backing `lo_alloc` (`runtime-abi.md` §3.1).
 //!
 //! One backing allocation contains a nursery followed by two equal tenured
-//! Cheney semispaces. The nursery targets one quarter of the aligned heap;
-//! rounding leftovers go to it so the tenured spaces remain equal.
+//! Cheney semispaces. The nursery targets `1 / NURSERY_DIVISOR` of the aligned
+//! heap; rounding leftovers go to it so the tenured spaces remain equal. Live
+//! data can fill one tenured space, so a smaller nursery leaves more of the heap
+//! usable (about `(1 - 1/NURSERY_DIVISOR) / 2`, versus 1/2 for plain Cheney).
 //!
 //! Allocation bumps through the nursery. On a no-fit, `lo_alloc` collects and
 //! retries once; failure to fit aborts (exit 137 native / `unreachable` WASM).
+//! An object larger than the whole nursery is allocated directly at the tail of
+//! the active tenured space; if that does not fit, a major collection runs
+//! first, so the abort happens only when a full collection cannot make room.
 //! Minor collections immediately promote survivors into the active tenured tail;
 //! major collections copy nursery and active tenured survivors into the spare.
 //!
@@ -28,6 +33,10 @@ const DEFAULT_HEAP_SIZE: usize = 16 * 1024 * 1024;
 /// All allocations (and each semispace base) are aligned to this; covers
 /// `Object`'s 8-byte pointer field with headroom.
 const HEAP_ALIGN: usize = 16;
+/// The nursery targets `1 / NURSERY_DIVISOR` of the heap (at least one alignment
+/// unit). The only knob for the nursery/tenured split: `heap_partition` and its
+/// tests are written in terms of it, so changing it needs no other edit.
+const NURSERY_DIVISOR: usize = 16;
 
 /// Base of the whole backing region (for `dealloc`); null when uninitialized.
 static mut HEAP_BASE: *mut u8 = ptr::null_mut();
@@ -59,7 +68,7 @@ fn heap_partition(total: usize) -> (usize, usize) {
         total_units >= 3,
         "heap requires at least three alignment units"
     );
-    let target_nursery_units = (total_units / 4).max(1);
+    let target_nursery_units = (total_units / NURSERY_DIVISOR).max(1);
     let tenured_units = (total_units - target_nursery_units) / 2;
     let nursery_units = total_units - 2 * tenured_units;
     (nursery_units * HEAP_ALIGN, tenured_units * HEAP_ALIGN)
@@ -83,6 +92,12 @@ pub(crate) fn heap_init() {
         let base = std::alloc::alloc_zeroed(layout);
         if base.is_null() {
             std::alloc::handle_alloc_error(layout);
+        }
+        // gc-debug: all free space starts poisoned (see `gc_debug`).
+        #[cfg(feature = "gc-debug")]
+        {
+            ptr::write_bytes(base, crate::gc_debug::POISON_BYTE, region);
+            crate::gc_debug::reset_stats();
         }
         HEAP_BASE = base;
         HEAP_LAYOUT = Some(layout);
@@ -131,33 +146,87 @@ pub(crate) fn heap_shutdown() {
     }
 }
 
-/// Carve `size` zero-initialized bytes from the nursery and stamp the header.
-/// On a no-fit, collect with automatic minor/major selection and retry once;
-/// abort (exit 137 native) if the request still does not fit.
+/// Carve `size` zero-initialized bytes and stamp the header: from the nursery,
+/// or straight from tenured space for an object larger than the nursery (see
+/// [`alloc_slot`]). On a no-fit, collect and retry once; abort (exit 137
+/// native) if the request still does not fit.
 ///
 /// # Safety
 /// `class` must point at a valid, live `ClassDescriptor`. `size` must be at least
 /// `size_of::<Object>()` so the header fits, and a multiple of 8.
 unsafe fn alloc_raw(size: usize, class: *const ClassDescriptor) -> *mut Object {
-    let bump = bump_if_fits(size);
-    let slot = if !bump.is_null() {
-        bump
-    } else {
-        // OOM path: collect, then retry the bump exactly once.
-        crate::gc::collect(false);
-        let retry = bump_if_fits(size);
-        if retry.is_null() {
-            crate::abort::runtime_abort("lo_alloc: out of memory", 137);
-        }
-        retry
-    };
-
+    let slot = alloc_slot(size);
     ptr::write_bytes(slot, 0, size);
     let obj = slot as *mut Object;
     (*obj).class_descriptor = class;
     (*obj).gc_bits = 0;
     (*obj).flags = 0;
     obj
+}
+
+/// Reserve `size` bytes for a new object, collecting if necessary; abort if
+/// the request cannot be satisfied even after a full collection.
+///
+/// An object larger than the whole nursery could never fit there, so it is
+/// allocated directly in the active tenured space ([`alloc_large`]). Such an
+/// object is born zeroed, so it holds no old-to-young pointer yet; every later
+/// pointer store into it goes through the write barrier, which records it
+/// because it lives in tenured space.
+unsafe fn alloc_slot(size: usize) -> *mut u8 {
+    if size > NURSERY_LIMIT as usize - NURSERY_BASE as usize {
+        return alloc_large(size);
+    }
+    let bump = bump_if_fits(size);
+    if !bump.is_null() {
+        return bump;
+    }
+    // OOM path: collect, then retry the bump exactly once. A collection
+    // empties the nursery and `size` fits in an empty one, so the retry only
+    // fails if `collect` itself aborted.
+    crate::gc::collect(false);
+    let retry = bump_if_fits(size);
+    if retry.is_null() {
+        crate::abort::runtime_abort("lo_alloc: out of memory", 137);
+    }
+    retry
+}
+
+/// Reserve `size` bytes at the tail of the active tenured space. On a no-fit,
+/// run a major collection (reclaiming dead tenured objects) and retry once;
+/// abort 137 if it still does not fit, i.e. when a full collection cannot make
+/// room.
+///
+/// # Safety
+/// Reads/writes the allocator statics on the single runtime thread.
+unsafe fn alloc_large(size: usize) -> *mut u8 {
+    let slot = bump_tenured_if_fits(size);
+    if !slot.is_null() {
+        return slot;
+    }
+    crate::gc::collect(true);
+    let retry = bump_tenured_if_fits(size);
+    if retry.is_null() {
+        crate::abort::runtime_abort("lo_alloc: out of memory", 137);
+    }
+    retry
+}
+
+/// Try to bump `size` bytes from the active tenured space. Null if it does not
+/// fit.
+///
+/// # Safety
+/// Reads/writes the allocator statics on the single runtime thread.
+unsafe fn bump_tenured_if_fits(size: usize) -> *mut u8 {
+    let free = TENURED_FREE;
+    debug_assert!(!free.is_null(), "heap must be initialized");
+    let Some(new_addr) = (free as usize).checked_add(size) else {
+        return ptr::null_mut();
+    };
+    if new_addr > TENURED_FROM_LIMIT as usize {
+        return ptr::null_mut();
+    }
+    TENURED_FREE = free.add(size);
+    free
 }
 
 /// Try to bump `size` bytes from the nursery. Return the carved slot on
@@ -299,6 +368,14 @@ pub fn heap_used() -> usize {
     }
 }
 
+/// Nursery capacity in bytes. Zero when the heap is uninitialized. Not part of
+/// the ABI; lets tests size their allocations against the real nursery.
+#[doc(hidden)]
+pub fn nursery_size() -> usize {
+    // SAFETY: by-value reads on the single runtime thread.
+    unsafe { NURSERY_LIMIT as usize - NURSERY_BASE as usize }
+}
+
 /// Total backing heap capacity, including the nursery and both tenured semispaces.
 /// Returns zero when the heap is uninitialized. Not part of the ABI.
 #[doc(hidden)]
@@ -309,7 +386,7 @@ pub fn heap_size() -> usize {
 
 #[cfg(test)]
 mod tests {
-    use super::{heap_partition, HEAP_ALIGN};
+    use super::{heap_partition, HEAP_ALIGN, NURSERY_DIVISOR};
 
     #[test]
     fn minimum_heap_has_three_equal_regions() {
@@ -317,12 +394,31 @@ mod tests {
     }
 
     #[test]
-    fn odd_units_leave_remainder_in_nursery() {
-        assert_eq!(heap_partition(7 * HEAP_ALIGN), (HEAP_ALIGN, 3 * HEAP_ALIGN));
-        assert_eq!(
-            heap_partition(9 * HEAP_ALIGN),
-            (3 * HEAP_ALIGN, 3 * HEAP_ALIGN)
-        );
+    fn nursery_is_one_divisor_th_of_the_heap_and_remainder_goes_to_it() {
+        // Exact multiple: target nursery units = total / divisor.
+        let total_units = 4 * NURSERY_DIVISOR;
+        let (nursery, tenured) = heap_partition(total_units * HEAP_ALIGN);
+        assert_eq!(nursery, 4 * HEAP_ALIGN);
+        assert_eq!(tenured, (total_units - 4) / 2 * HEAP_ALIGN);
+
+        // An odd leftover unit cannot split across two tenured spaces, so the
+        // nursery absorbs it.
+        let total_units = 4 * NURSERY_DIVISOR + 1;
+        let (nursery, tenured) = heap_partition(total_units * HEAP_ALIGN);
+        let tenured_units = (total_units - 4) / 2;
+        assert_eq!(tenured, tenured_units * HEAP_ALIGN);
+        assert_eq!(nursery, (total_units - 2 * tenured_units) * HEAP_ALIGN);
+        assert!(nursery > 4 * HEAP_ALIGN, "the odd unit went to the nursery");
+    }
+
+    #[test]
+    fn tenured_spaces_hold_almost_half_the_heap() {
+        // The reason the nursery is small: live data can fill one tenured space.
+        // Cheney gets 50%; the generational layout must stay close to it.
+        for total in [4096, 65536, 1 << 20, 16 << 20] {
+            let (_, tenured) = heap_partition(total);
+            assert!(tenured * 100 >= total * 45, "{total}: tenured {tenured}");
+        }
     }
 
     #[test]

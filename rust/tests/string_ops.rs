@@ -4,7 +4,7 @@
 use lo_runtime::{
     heap_used, lo_pop_frame, lo_push_frame, lo_runtime_init, lo_runtime_shutdown,
     lo_string_compare, lo_string_concat, lo_string_new, lo_string_repeat, lo_string_reverse,
-    string_data_offset, Object, ShadowFrame, StringObject, LO_STRING_CLASS,
+    nursery_size, string_data_offset, Object, ShadowFrame, StringObject, LO_STRING_CLASS,
 };
 use std::process::Command;
 use std::sync::{Mutex, MutexGuard};
@@ -72,21 +72,21 @@ unsafe fn assert_string(string: *mut Object, expected: &[u8]) {
     assert_eq!(string_bytes(string), expected);
 }
 
-/// Fill a 1 KiB nursery to 1,008 bytes, leaving less room than the smallest
-/// string allocation. The next string result must therefore collect before it
-/// can be allocated.
+/// Fill the nursery to 16 bytes short of full, leaving less room than the
+/// smallest string allocation (24 bytes). The next string result must therefore
+/// collect before it can be allocated.
 unsafe fn leave_insufficient_nursery_space() {
-    const TARGET_USED: usize = 1_008;
+    let target_used = nursery_size() - 16;
     let used = heap_used();
-    assert!(used < TARGET_USED);
-    let allocation_size = TARGET_USED - used;
+    assert!(used < target_used);
+    let allocation_size = target_used - used;
     assert_eq!(allocation_size % 8, 0);
     let filler_length = allocation_size
         .checked_sub(string_data_offset())
         .expect("room for a StringObject header");
     let filler = vec![b'x'; filler_length];
     let _dead = new_string(&filler);
-    assert_eq!(heap_used(), TARGET_USED);
+    assert_eq!(heap_used(), target_used);
 }
 
 #[test]
@@ -235,5 +235,41 @@ fn negative_repeat_reports_count_and_exits_120() {
     assert_eq!(
         String::from_utf8_lossy(&output.stderr),
         "lo_string_repeat: negative count -7\n"
+    );
+}
+
+/// Run the probe (`repeat("x", count)`) under `heap_size`, or the default heap.
+fn run_repeat_probe(count: &str, heap_size: Option<&str>) -> std::process::Output {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_lo_string_probe"));
+    command.arg(count);
+    match heap_size {
+        Some(size) => command.env("LO_HEAP_SIZE", size),
+        None => command.env_remove("LO_HEAP_SIZE"),
+    };
+    command.output().expect("run lo_string_probe")
+}
+
+#[test]
+fn string_larger_than_nursery_allocates_on_the_default_heap() {
+    // 5 MB exceeds the 16 MiB heap's nursery; it must still be allocatable.
+    let output = run_repeat_probe("5000000", None);
+    assert_eq!(output.status.code(), Some(0), "{output:?}");
+}
+
+#[test]
+fn string_larger_than_nursery_allocates_on_a_small_heap() {
+    let output = run_repeat_probe("20000", Some("65536"));
+    assert_eq!(output.status.code(), Some(0), "{output:?}");
+}
+
+#[test]
+fn string_larger_than_the_whole_heap_exits_137() {
+    let output = run_repeat_probe("1000000", Some("65536"));
+    assert_eq!(output.status.code(), Some(137));
+    // Under `gc-debug` the failed major collection logs lines first; the abort
+    // message is always the last line.
+    assert!(
+        String::from_utf8_lossy(&output.stderr).ends_with("lo_alloc: out of memory\n"),
+        "{output:?}"
     );
 }

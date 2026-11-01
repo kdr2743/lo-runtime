@@ -12,6 +12,7 @@
 //! - [`init`] — runtime lifecycle.
 //! - [`io`] — print / read / EOF.
 //! - [`gc`] — generational copying collector and remembered-set write barrier.
+//! - `gc_debug` — poisoning, heap checker and stats (cargo feature `gc-debug`).
 //! - [`string_ops`] — UTF-8 string construction and primitive operations.
 //! - [`cast`] — runtime cast and `instanceof` checks.
 //! - [`abort`] — runtime abort paths + `lo_abort_null_receiver`.
@@ -24,6 +25,8 @@ mod alloc;
 mod cast;
 mod descriptors;
 mod gc;
+#[cfg(feature = "gc-debug")]
+mod gc_debug;
 mod init;
 mod io;
 mod object;
@@ -60,6 +63,9 @@ pub use string_ops::{
 
 // Debug/test hooks (not part of the ABI).
 #[doc(hidden)]
-pub use alloc::{heap_size, heap_used};
+pub use alloc::{heap_size, heap_used, nursery_size};
+#[cfg(feature = "gc-debug")]
+#[doc(hidden)]
+pub use gc_debug::{gc_debug_stats, GcStats};
 #[doc(hidden)]
 pub use shadow_stack::current_frame;
