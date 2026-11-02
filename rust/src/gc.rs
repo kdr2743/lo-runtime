@@ -990,6 +990,7 @@ mod tests {
                 assert_eq!((s.large_allocs, s.large_forced_majors), (2, 1));
                 assert_eq!(s.majors, 1);
                 assert_eq!((s.majors_alloc, s.majors_explicit), (0, 0));
+                assert_large_string_intact(frame.roots[0]);
                 lo_pop_frame();
             });
         }
