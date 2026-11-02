@@ -199,10 +199,14 @@ unsafe fn alloc_slot(size: usize) -> *mut u8 {
 /// # Safety
 /// Reads/writes the allocator statics on the single runtime thread.
 unsafe fn alloc_large(size: usize) -> *mut u8 {
+    #[cfg(feature = "gc-debug")]
+    crate::gc_debug::note(|s| s.large_allocs += 1);
     let slot = bump_tenured_if_fits(size);
     if !slot.is_null() {
         return slot;
     }
+    #[cfg(feature = "gc-debug")]
+    crate::gc_debug::note(|s| s.large_forced_majors += 1);
     crate::gc::collect(true);
     let retry = bump_tenured_if_fits(size);
     if retry.is_null() {

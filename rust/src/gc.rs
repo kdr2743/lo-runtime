@@ -63,9 +63,16 @@ pub unsafe extern "C" fn lo_gc_write_barrier(
     value: *mut Object,
 ) {
     let slot = (obj as *mut u8).add(field_offset as usize) as *mut *mut Object;
+    #[cfg(feature = "gc-debug")]
+    crate::gc_debug::note(|s| s.barrier_calls += 1);
     if crate::alloc::in_tenure(obj) && crate::alloc::in_nursery(value) {
         REMEMBERED_SET.with_borrow_mut(|set| {
-            set.insert(obj);
+            let _is_new_entry = set.insert(obj);
+            #[cfg(feature = "gc-debug")]
+            crate::gc_debug::note(|s| {
+                s.barrier_recorded += 1;
+                s.barrier_new_entries += u64::from(_is_new_entry);
+            });
         });
     }
     *slot = value;
@@ -76,6 +83,8 @@ pub unsafe extern "C" fn lo_gc_write_barrier(
 /// interior pointers, then flip and reset the nursery.
 #[no_mangle]
 pub extern "C" fn lo_gc_collect() {
+    #[cfg(feature = "gc-debug")]
+    crate::gc_debug::note(|s| s.majors_explicit += 1);
     // SAFETY: called on the single runtime thread with initialized heap state
     // and valid shadow-stack roots.
     unsafe { collect(true) }
@@ -198,8 +207,15 @@ pub(crate) unsafe fn collect(force_major: bool) {
     #[cfg(feature = "gc-debug")]
     let (copied_start, used_before) = (free, crate::alloc::heap_used());
     let mut frame = crate::shadow_stack::current_frame();
+    #[cfg(feature = "gc-debug")]
+    let (mut frames_seen, mut roots_seen) = (0u64, 0u64);
     while !frame.is_null() {
         let num = (*frame).num_roots as usize;
+        #[cfg(feature = "gc-debug")]
+        {
+            frames_seen += 1;
+            roots_seen += num as u64;
+        }
         let roots_base = (frame as *mut u8).add(shadow_frame_roots_offset());
         for i in 0..num {
             let slot = roots_base.add(i * core::mem::size_of::<*mut Object>()) as *mut *mut Object;
@@ -209,9 +225,22 @@ pub(crate) unsafe fn collect(force_major: bool) {
         }
         frame = (*frame).parent;
     }
+    #[cfg(feature = "gc-debug")]
+    crate::gc_debug::note(|s| {
+        s.max_frames = s.max_frames.max(frames_seen);
+        s.max_roots = s.max_roots.max(roots_seen);
+    });
 
     if !major_alloc {
         REMEMBERED_SET.with_borrow_mut(|set| {
+            #[cfg(feature = "gc-debug")]
+            {
+                let scanned = set.len() as u64;
+                crate::gc_debug::note(|s| {
+                    s.remembered_scanned_total += scanned;
+                    s.remembered_max = s.remembered_max.max(scanned);
+                });
+            }
             for obj in set.drain() {
                 let class = (*obj).class_descriptor;
                 for i in 0..(*class).pointer_count as usize {

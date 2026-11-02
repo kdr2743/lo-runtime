@@ -35,6 +35,11 @@ const CHECK_FAILED_EXIT: i32 = 70;
 const MAX_PARENT_DEPTH: usize = 1024;
 
 /// Cumulative collection counters since `lo_runtime_init`.
+///
+/// The first group counts collections. The rest measure what the collector and
+/// write barrier actually exercised, so a stress run can be checked for coverage:
+/// a program that never promotes an object or records a barrier entry cannot be
+/// protecting those paths.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct GcStats {
     pub collections: u64,
@@ -44,18 +49,52 @@ pub struct GcStats {
     pub reclaimed_bytes: u64,
     /// Survivor objects copied, summed over collections.
     pub copied_objects: u64,
+
+    /// Majors triggered by an allocation (a minor would not fit, or a large
+    /// object needed room), as opposed to `majors_explicit`.
+    pub majors_alloc: u64,
+    /// Majors forced by `lo_gc_collect`.
+    pub majors_explicit: u64,
+    /// Survivors copied into tenured space by minor collections. The collector
+    /// promotes immediately, so this is every minor survivor.
+    pub promoted_objects: u64,
+
+    /// Calls to `lo_gc_write_barrier`.
+    pub barrier_calls: u64,
+    /// Calls that stored a nursery pointer into a tenured object.
+    pub barrier_recorded: u64,
+    /// Recorded calls that added a new remembered-set entry (the object was not
+    /// already remembered).
+    pub barrier_new_entries: u64,
+    /// Remembered-set entries scanned, summed over minors.
+    pub remembered_scanned_total: u64,
+    /// Largest remembered set any one minor scanned.
+    pub remembered_max: u64,
+
+    /// Objects larger than the nursery, allocated directly in tenured space.
+    pub large_allocs: u64,
+    /// Large allocations that did not fit and forced a major first.
+    pub large_forced_majors: u64,
+
+    /// Most live bytes any major left in tenured space (`heap_used` right after).
+    pub peak_live_after_major: u64,
+    /// Deepest shadow-stack chain and most roots in one chain at a collection.
+    pub max_frames: u64,
+    pub max_roots: u64,
 }
 
 thread_local! {
-    static STATS: Cell<GcStats> = const {
-        Cell::new(GcStats {
-            collections: 0,
-            minors: 0,
-            majors: 0,
-            reclaimed_bytes: 0,
-            copied_objects: 0,
-        })
-    };
+    static STATS: Cell<GcStats> = Cell::new(GcStats::default());
+}
+
+/// Apply `f` to the counters. The one place that mutates `STATS`, so every hook
+/// stays a one-liner and compiles to nothing when `gc-debug` is off.
+pub(crate) fn note(f: impl FnOnce(&mut GcStats)) {
+    STATS.with(|c| {
+        let mut s = c.get();
+        f(&mut s);
+        c.set(s);
+    });
 }
 
 /// Counters since the last `lo_runtime_init`. Test/diagnostic hook, not ABI.
@@ -113,16 +152,25 @@ pub(crate) unsafe fn after_collection(s: CollectSummary) {
 
     let used_after = crate::alloc::heap_used();
     let reclaimed = s.used_before.saturating_sub(used_after);
-    let mut stats = gc_debug_stats();
-    stats.collections += 1;
-    if s.major {
-        stats.majors += 1;
-    } else {
-        stats.minors += 1;
-    }
-    stats.reclaimed_bytes += reclaimed as u64;
-    stats.copied_objects += walk.copied as u64;
-    STATS.with(|c| c.set(stats));
+    note(|stats| {
+        stats.collections += 1;
+        if s.major {
+            stats.majors += 1;
+            // A major nobody forced: a minor would not have fit.
+            if !s.explicit {
+                stats.majors_alloc += 1;
+            }
+            // Right after a major, tenured holds only survivors.
+            stats.peak_live_after_major = stats.peak_live_after_major.max(used_after as u64);
+        } else {
+            stats.minors += 1;
+            // Immediate promotion: every minor survivor moves to tenured space.
+            stats.promoted_objects += walk.copied as u64;
+        }
+        stats.reclaimed_bytes += reclaimed as u64;
+        stats.copied_objects += walk.copied as u64;
+    });
+    let stats = gc_debug_stats();
 
     #[cfg(not(target_arch = "wasm32"))]
     eprintln!(
