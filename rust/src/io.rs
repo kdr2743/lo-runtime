@@ -107,6 +107,20 @@ mod sys {
     }
 }
 
+/// Write a diagnostic line to stderr through the print family's channel, so the
+/// WASM host forwards it like any other stderr output. Used only by the
+/// `gc-debug` summary; not part of the ABI.
+#[cfg(feature = "gc-debug")]
+pub(crate) fn write_diag_stderr(bytes: &[u8]) {
+    #[cfg(not(target_arch = "wasm32"))]
+    sys::write_sel(bytes, 1);
+    #[cfg(target_arch = "wasm32")]
+    // SAFETY: `bytes` is a valid slice; the import only reads `len` bytes.
+    unsafe {
+        sys::host_print_bytes(bytes.as_ptr(), bytes.len() as i32, 1);
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Shared input parsing (native only — WASM delegates token parsing to the host).
 // ---------------------------------------------------------------------------

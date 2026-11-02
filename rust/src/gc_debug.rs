@@ -83,6 +83,43 @@ pub struct GcStats {
     pub max_roots: u64,
 }
 
+impl GcStats {
+    /// One `key=value` line with every counter, for the measurement scripts and
+    /// the `[lo-gc-summary]` log. Counters are cumulative, so the last line a run
+    /// prints is its summary.
+    pub fn summary(&self) -> String {
+        format!(
+            "[lo-gc-summary] collections={} minors={} majors={} majors_alloc={} \
+             majors_explicit={} large_forced_majors={} promoted={} copied={} \
+             reclaimed={} barrier_calls={} barrier_recorded={} barrier_new={} \
+             remembered_scanned={} remembered_max={} large_allocs={} \
+             peak_live_after_major={} max_frames={} max_roots={}\n",
+            self.collections,
+            self.minors,
+            self.majors,
+            self.majors_alloc,
+            self.majors_explicit,
+            self.large_forced_majors,
+            self.promoted_objects,
+            self.copied_objects,
+            self.reclaimed_bytes,
+            self.barrier_calls,
+            self.barrier_recorded,
+            self.barrier_new_entries,
+            self.remembered_scanned_total,
+            self.remembered_max,
+            self.large_allocs,
+            self.peak_live_after_major,
+            self.max_frames,
+            self.max_roots,
+        )
+    }
+}
+
+/// Print the summary after every major, and every this-many collections
+/// otherwise, so a run with no majors still reports its counters.
+const SUMMARY_EVERY: u64 = 100;
+
 thread_local! {
     static STATS: Cell<GcStats> = Cell::new(GcStats::default());
 }
@@ -171,6 +208,9 @@ pub(crate) unsafe fn after_collection(s: CollectSummary) {
         stats.copied_objects += walk.copied as u64;
     });
     let stats = gc_debug_stats();
+    if s.major || stats.collections.is_multiple_of(SUMMARY_EVERY) {
+        crate::io::write_diag_stderr(stats.summary().as_bytes());
+    }
 
     #[cfg(not(target_arch = "wasm32"))]
     eprintln!(
