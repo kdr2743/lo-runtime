@@ -790,11 +790,15 @@ mod tests {
         fn checker_rejects_bad_root() {
             with_runtime(Some("4096"), || unsafe {
                 with_tenured_root(|frame, old| {
+                    // Volatile stores: `verify_heap` reads the root through the shadow
+                    // stack, which the optimizer cannot see in a release build, so a
+                    // plain store here is dead and gets dropped.
+                    let root = core::ptr::addr_of_mut!(frame.roots[0]);
                     // One byte into the object: inside the heap, not an object start.
-                    frame.roots[0] = (old as *mut u8).add(8) as *mut Object;
+                    core::ptr::write_volatile(root, (old as *mut u8).add(8) as *mut Object);
                     let err = verify_heap().unwrap_err();
                     assert!(err.contains("shadow-stack root"), "{err}");
-                    frame.roots[0] = old;
+                    core::ptr::write_volatile(root, old);
                     assert_eq!(verify_heap(), Ok(()));
                 });
             });

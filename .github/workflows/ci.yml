@@ -28,6 +28,8 @@ jobs:
           cargo build --target wasm32-unknown-unknown --features gc-debug
           cargo test
           cargo test --features gc-debug
+          cargo test --release
+          cargo test --release --features gc-debug
           cargo clippy --all-targets -- -D warnings
           cargo clippy --all-targets --features gc-debug -- -D warnings
           cargo fmt --check
