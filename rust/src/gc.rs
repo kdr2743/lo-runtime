@@ -63,9 +63,16 @@ pub unsafe extern "C" fn lo_gc_write_barrier(
     value: *mut Object,
 ) {
     let slot = (obj as *mut u8).add(field_offset as usize) as *mut *mut Object;
+    #[cfg(feature = "gc-debug")]
+    crate::gc_debug::note(|s| s.barrier_calls += 1);
     if crate::alloc::in_tenure(obj) && crate::alloc::in_nursery(value) {
         REMEMBERED_SET.with_borrow_mut(|set| {
-            set.insert(obj);
+            let _is_new_entry = set.insert(obj);
+            #[cfg(feature = "gc-debug")]
+            crate::gc_debug::note(|s| {
+                s.barrier_recorded += 1;
+                s.barrier_new_entries += u64::from(_is_new_entry);
+            });
         });
     }
     *slot = value;
@@ -76,6 +83,8 @@ pub unsafe extern "C" fn lo_gc_write_barrier(
 /// interior pointers, then flip and reset the nursery.
 #[no_mangle]
 pub extern "C" fn lo_gc_collect() {
+    #[cfg(feature = "gc-debug")]
+    crate::gc_debug::note(|s| s.majors_explicit += 1);
     // SAFETY: called on the single runtime thread with initialized heap state
     // and valid shadow-stack roots.
     unsafe { collect(true) }
@@ -198,8 +207,15 @@ pub(crate) unsafe fn collect(force_major: bool) {
     #[cfg(feature = "gc-debug")]
     let (copied_start, used_before) = (free, crate::alloc::heap_used());
     let mut frame = crate::shadow_stack::current_frame();
+    #[cfg(feature = "gc-debug")]
+    let (mut frames_seen, mut roots_seen) = (0u64, 0u64);
     while !frame.is_null() {
         let num = (*frame).num_roots as usize;
+        #[cfg(feature = "gc-debug")]
+        {
+            frames_seen += 1;
+            roots_seen += num as u64;
+        }
         let roots_base = (frame as *mut u8).add(shadow_frame_roots_offset());
         for i in 0..num {
             let slot = roots_base.add(i * core::mem::size_of::<*mut Object>()) as *mut *mut Object;
@@ -209,9 +225,22 @@ pub(crate) unsafe fn collect(force_major: bool) {
         }
         frame = (*frame).parent;
     }
+    #[cfg(feature = "gc-debug")]
+    crate::gc_debug::note(|s| {
+        s.max_frames = s.max_frames.max(frames_seen);
+        s.max_roots = s.max_roots.max(roots_seen);
+    });
 
     if !major_alloc {
         REMEMBERED_SET.with_borrow_mut(|set| {
+            #[cfg(feature = "gc-debug")]
+            {
+                let scanned = set.len() as u64;
+                crate::gc_debug::note(|s| {
+                    s.remembered_scanned_total += scanned;
+                    s.remembered_max = s.remembered_max.max(scanned);
+                });
+            }
             for obj in set.drain() {
                 let class = (*obj).class_descriptor;
                 for i in 0..(*class).pointer_count as usize {
@@ -870,6 +899,173 @@ mod tests {
                 assert!(frame.roots.iter().all(|r| !r.is_null()));
                 lo_pop_frame();
             });
+        }
+
+        #[test]
+        fn counters_track_barrier_calls_records_and_remembered_scans() {
+            with_runtime(Some("4096"), || unsafe {
+                with_tenured_root(|_, old| {
+                    let young = lo_alloc(&NODE_CLASS);
+                    assert!(crate::alloc::in_nursery(young));
+                    let before = gc_debug_stats();
+
+                    let barrier = crate::gc::lo_gc_write_barrier;
+                    barrier(old, 16, young); // old -> young: recorded, new entry
+                    barrier(old, 16, young); // recorded again, entry already there
+                    barrier(old, 16, core::ptr::null_mut()); // null: not recorded
+                    barrier(young, 16, old); // young object: not recorded
+                    barrier(old, 16, young); // restore the old -> young edge
+
+                    let after = gc_debug_stats();
+                    assert_eq!(after.barrier_calls - before.barrier_calls, 5);
+                    assert_eq!(after.barrier_recorded - before.barrier_recorded, 3);
+                    assert_eq!(after.barrier_new_entries - before.barrier_new_entries, 1);
+                    assert_eq!(crate::gc::remembered_len(), 1);
+
+                    // The minor must scan that one remembered object, and `young`
+                    // survives only through it, so it is promoted.
+                    super::super::collect(false);
+                    let minor = gc_debug_stats();
+                    assert_eq!(minor.remembered_scanned_total, 1);
+                    assert_eq!(minor.remembered_max, 1);
+                    assert_eq!(minor.promoted_objects - before.promoted_objects, 1);
+                    assert!(crate::alloc::in_tenure(get_field(old, 16)));
+                });
+            });
+        }
+
+        #[test]
+        fn majors_are_split_by_cause_and_add_up() {
+            with_runtime(Some("4096"), || unsafe {
+                let mut frame = TestFrame::<1>::new();
+                lo_push_frame(frame.as_frame());
+                lo_gc_collect();
+                let explicit = gc_debug_stats();
+                assert_eq!((explicit.majors, explicit.majors_explicit), (1, 1));
+                assert_eq!(explicit.majors_alloc, 0);
+
+                // Retain a chain of 40 nodes, then drop it, so tenured space fills
+                // with garbage a major can reclaim. A minor stops fitting and the
+                // allocator falls back to a major nobody asked for.
+                for i in 0..400 {
+                    let node = lo_alloc(&NODE_CLASS);
+                    set_field(node, 16, frame.roots[0]);
+                    frame.roots[0] = if i % 40 == 39 {
+                        core::ptr::null_mut()
+                    } else {
+                        node
+                    };
+                }
+                lo_pop_frame();
+
+                let s = gc_debug_stats();
+                assert!(
+                    s.majors_alloc >= 1,
+                    "allocation pressure forced no major: {s:?}"
+                );
+                assert_eq!(s.majors_explicit, 1);
+                assert_eq!(s.large_forced_majors, 0);
+                assert_eq!(
+                    s.majors,
+                    s.majors_alloc + s.majors_explicit + s.large_forced_majors
+                );
+                assert!(s.minors >= 1 && s.promoted_objects >= 1);
+                assert!(s.peak_live_after_major <= crate::alloc::heap_size() as u64);
+            });
+        }
+
+        #[test]
+        fn large_object_major_counts_as_large_forced_not_explicit() {
+            with_runtime(Some(LARGE_HEAP), || unsafe {
+                let mut frame = TestFrame::<1>::new();
+                lo_push_frame(frame.as_frame());
+                let _garbage = large_string();
+                let first = gc_debug_stats();
+                assert_eq!((first.large_allocs, first.large_forced_majors), (1, 0));
+                assert_eq!(first.majors, 0);
+
+                // Does not fit beside the garbage: the allocator runs a major.
+                frame.roots[0] = large_string();
+                let s = gc_debug_stats();
+                assert_eq!((s.large_allocs, s.large_forced_majors), (2, 1));
+                assert_eq!(s.majors, 1);
+                assert_eq!((s.majors_alloc, s.majors_explicit), (0, 0));
+                assert_large_string_intact(frame.roots[0]);
+                lo_pop_frame();
+            });
+        }
+
+        #[test]
+        fn root_scan_records_frame_and_root_depth() {
+            with_runtime(Some("4096"), || unsafe {
+                let mut a = TestFrame::<2>::new();
+                let mut b = TestFrame::<3>::new();
+                let mut c = TestFrame::<1>::new();
+                lo_push_frame(a.as_frame());
+                lo_push_frame(b.as_frame());
+                lo_push_frame(c.as_frame());
+                super::super::collect(false);
+                let s = gc_debug_stats();
+                assert_eq!((s.max_frames, s.max_roots), (3, 6));
+
+                // The maximum is sticky: a shallower scan does not lower it.
+                lo_pop_frame();
+                lo_pop_frame();
+                super::super::collect(false);
+                assert_eq!(gc_debug_stats().max_frames, 3);
+                lo_pop_frame();
+            });
+        }
+
+        #[test]
+        fn summary_line_round_trips_every_counter() {
+            let stats = crate::gc_debug::GcStats {
+                collections: 1,
+                minors: 2,
+                majors: 3,
+                reclaimed_bytes: 4,
+                copied_objects: 5,
+                majors_alloc: 6,
+                majors_explicit: 7,
+                promoted_objects: 8,
+                barrier_calls: 9,
+                barrier_recorded: 10,
+                barrier_new_entries: 11,
+                remembered_scanned_total: 12,
+                remembered_max: 13,
+                large_allocs: 14,
+                large_forced_majors: 15,
+                peak_live_after_major: 16,
+                max_frames: 17,
+                max_roots: 18,
+            };
+            let line = stats.summary();
+            assert!(line.starts_with("[lo-gc-summary] ") && line.ends_with('\n'));
+            let get = |key: &str| -> u64 {
+                line.split_whitespace()
+                    .find_map(|t| t.strip_prefix(key)?.strip_prefix('='))
+                    .unwrap_or_else(|| panic!("no {key} in {line}"))
+                    .parse()
+                    .unwrap()
+            };
+            assert_eq!(get("collections"), 1);
+            assert_eq!(get("minors"), 2);
+            assert_eq!(get("majors"), 3);
+            assert_eq!(get("reclaimed"), 4);
+            assert_eq!(get("copied"), 5);
+            assert_eq!(get("majors_alloc"), 6);
+            assert_eq!(get("majors_explicit"), 7);
+            assert_eq!(get("promoted"), 8);
+            assert_eq!(get("barrier_calls"), 9);
+            assert_eq!(get("barrier_recorded"), 10);
+            assert_eq!(get("barrier_new"), 11);
+            assert_eq!(get("remembered_scanned"), 12);
+            assert_eq!(get("remembered_max"), 13);
+            assert_eq!(get("large_allocs"), 14);
+            assert_eq!(get("large_forced_majors"), 15);
+            assert_eq!(get("peak_live_after_major"), 16);
+            assert_eq!(get("max_frames"), 17);
+            assert_eq!(get("max_roots"), 18);
         }
 
         #[test]
