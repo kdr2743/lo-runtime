@@ -19,7 +19,7 @@ use crate::descriptors::LO_STRING_CLASS;
 use crate::object::{shadow_frame_roots_offset, string_data_offset, Object, StringObject};
 
 /// Mark bit in `gc_bits` for the mark-compact collector. Set before a marked
-/// object's pointer fields are traced, so a cycle returns instead of looping.
+/// object's pointer fields are pushed, so a cycle is not traced again.
 const GC_MARK_BIT: u32 = 0b1;
 
 /// Pointer-store write barrier. Non-generational implementation: a bare store of
@@ -76,32 +76,38 @@ unsafe fn object_size(p: *mut Object) -> usize {
 
 /// Mark `p` and every heap object reachable through its pointer fields.
 ///
-/// A pointer outside `[heap_base, free)` — null, `LO_EMPTY_STRING`, or any other
-/// non-heap address — is ignored and not entered. The mark bit is set before
-/// recursing, so a cycle hits an already-marked object and returns. The slot
-/// that held `p` is left unchanged; repair rewrites pointers later.
+/// The trace is an explicit stack on the system allocator, so a long chain does
+/// not overflow the call stack. A pointer outside `[heap_base, free)` — null,
+/// `LO_EMPTY_STRING`, or any other non-heap address — is ignored and not
+/// entered. The mark bit is set before children are pushed, so a cycle is
+/// skipped when it is seen again. The slot that held `p` is left unchanged;
+/// repair rewrites pointers later.
 ///
 /// # Safety
 /// `heap_base` and `free` are the occupied range from [`crate::alloc::occupied`].
 /// `p` is null, a pointer outside that range, or a valid object inside it whose
 /// `class_descriptor` is intact. Single-threaded.
 unsafe fn mark(p: *mut Object, heap_base: *mut u8, free: *mut u8) {
-    let addr = p as *mut u8;
-    if addr < heap_base || addr >= free {
-        return;
-    }
-    if (*p).gc_bits & GC_MARK_BIT != 0 {
-        return;
-    }
-    (*p).gc_bits |= GC_MARK_BIT;
+    let mut work = Vec::new();
+    work.push(p);
+    while let Some(obj) = work.pop() {
+        let addr = obj as *mut u8;
+        if addr < heap_base || addr >= free {
+            continue;
+        }
+        if (*obj).gc_bits & GC_MARK_BIT != 0 {
+            continue;
+        }
+        (*obj).gc_bits |= GC_MARK_BIT;
 
-    let class = (*p).class_descriptor;
-    let count = (*class).pointer_count as usize;
-    let offsets = (*class).pointer_offsets;
-    for i in 0..count {
-        let off = *offsets.add(i) as usize;
-        let slot = (p as *mut u8).add(off) as *mut *mut Object;
-        mark(*slot, heap_base, free);
+        let class = (*obj).class_descriptor;
+        let count = (*class).pointer_count as usize;
+        let offsets = (*class).pointer_offsets;
+        for i in 0..count {
+            let off = *offsets.add(i) as usize;
+            let slot = (obj as *mut u8).add(off) as *mut *mut Object;
+            work.push(*slot);
+        }
     }
 }
 
@@ -409,6 +415,39 @@ mod tests {
             // test process). The rooted node survived every collection.
             let live2 = frame.roots[0];
             assert_eq!((*live2).class_descriptor, &NODE_CLASS as *const _);
+
+            lo_pop_frame();
+        });
+    }
+
+    // A spine longer than the call stack must still be marked. Recursing on
+    // `next` overflowed and segfaulted instead of returning to the OOM path.
+    #[test]
+    fn long_chain_survives_collection() {
+        const N: usize = 100_000;
+        with_runtime(None, || unsafe {
+            let mut frame = TestFrame::<1>::new();
+            lo_push_frame(frame.as_frame());
+
+            let mut head: *mut Object = core::ptr::null_mut();
+            for _ in 0..N {
+                let node = lo_alloc(&NODE_CLASS);
+                set_field(node, 16, head);
+                head = node;
+            }
+            frame.roots[0] = head;
+
+            lo_gc_collect();
+
+            let mut cursor = frame.roots[0];
+            let mut seen = 0;
+            while !cursor.is_null() {
+                assert_eq!((*cursor).class_descriptor, &NODE_CLASS as *const _);
+                cursor = get_field(cursor, 16);
+                seen += 1;
+            }
+            assert_eq!(seen, N);
+            assert_eq!(heap_used(), N * 24);
 
             lo_pop_frame();
         });
