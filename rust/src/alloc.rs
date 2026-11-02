@@ -25,9 +25,9 @@ use core::ptr;
 #[cfg(debug_assertions)]
 use std::collections::HashSet;
 
-use crate::descriptors::LO_STRING_CLASS;
 #[cfg(debug_assertions)]
 use crate::descriptors::LO_EMPTY_STRING;
+use crate::descriptors::LO_STRING_CLASS;
 use crate::object::{string_data_offset, ClassDescriptor, Object, StringObject};
 
 /// Default total heap size (16 MiB), overridable via `LO_HEAP_SIZE` at init.
@@ -205,7 +205,7 @@ pub(crate) unsafe fn occupied() -> (*mut u8, *mut u8) {
 ///
 /// The debug heap check verifies shape: descriptors, pointer targets, mark bits, and the
 /// poisoned tail.
-/// 
+///
 /// # Safety
 /// `new_free` must lie in `[HEAP_BASE, HEAP_LIMIT]`. Called only by the collector
 /// at the end of a cycle, on the single runtime thread.
@@ -261,9 +261,8 @@ unsafe fn debug_heap_check(base: *mut u8, free: *mut u8, limit: *mut u8) {
             let off = *offsets.add(i) as usize;
             let slot = start.add(off) as *const *mut Object;
             let target = *slot;
-            let ok = target.is_null()
-                || target == empty
-                || start_set.contains(&(target as *mut u8));
+            let ok =
+                target.is_null() || target == empty || start_set.contains(&(target as *mut u8));
             assert!(
                 ok,
                 "object {:p} field at +{off} points at {:p}, not a live object, null, or LO_EMPTY_STRING",
@@ -274,10 +273,7 @@ unsafe fn debug_heap_check(base: *mut u8, free: *mut u8, limit: *mut u8) {
 
     let mut tail = free;
     while tail < limit {
-        assert_eq!(
-            *tail, 0xEF,
-            "reclaimed byte at {tail:p} is not poisoned"
-        );
+        assert_eq!(*tail, 0xEF, "reclaimed byte at {tail:p} is not poisoned");
         tail = tail.add(1);
     }
 }
@@ -306,7 +302,8 @@ unsafe fn checked_object_size(
         "class descriptor {class:p} for object {obj:p} lies inside the heap"
     );
     assert_eq!(
-        (*obj).gc_bits, 0,
+        (*obj).gc_bits,
+        0,
         "object {obj:p} still has gc_bits set after collection"
     );
 
@@ -316,7 +313,7 @@ unsafe fn checked_object_size(
             "string at {obj:p} is shorter than its header"
         );
         let len = (*(obj as *const StringObject)).length as usize;
-        let raw = string_data_offset().checked_add(len).unwrap_or(usize::MAX);
+        let raw = string_data_offset().saturating_add(len);
         align_up(raw, 8)
     } else {
         let raw = (*class).instance_size as usize;
@@ -354,7 +351,7 @@ unsafe fn checked_object_size(
     for i in 0..count {
         let off = *offsets.add(i) as usize;
         assert!(
-            off % ptr_align == 0
+            off.is_multiple_of(ptr_align)
                 && off >= core::mem::size_of::<Object>()
                 && off + ptr_size <= size,
             "object {obj:p} pointer offset {off} is outside the object or misaligned"
