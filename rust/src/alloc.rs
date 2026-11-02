@@ -1,50 +1,49 @@
-//! Semispace bump allocator backing `lo_alloc` (`runtime-abi.md` §3.1), with the
-//! WS-2 Cheney collector wired into the OOM path.
+//! Bump allocator backing `lo_alloc` (`runtime-abi.md` §3.1). The collector
+//! compacts in place; this module owns the heap geometry and the bump pointer.
 //!
-//! The managed heap is split into two equal **semispaces** (`runtime-abi.md`
-//! §2.1, runbook WS-2 §2.1). Exactly one is active at a time — the *from-space* —
-//! and allocation is a bump pointer (`FREE`) within it. When a request does not
-//! fit, `lo_alloc` forces a collection (`lo_gc_collect`, see [`crate::gc`]) and
+//! The managed heap is one contiguous region `[HEAP_BASE, HEAP_LIMIT)`.
+//! Allocation is a bump pointer (`FREE`) within it. When a request does not fit,
+//! `lo_alloc` forces a collection (`lo_gc_collect`, see [`crate::gc`]) and
 //! retries once; only a genuine live-set overflow aborts via the existing OOM
 //! contract (exit 137 native / `unreachable` WASM).
 //!
 //! Total heap size inherits the WS-1 mechanism (decision (5c)): a 16 MiB default,
-//! overridable at `lo_runtime_init` via the `LO_HEAP_SIZE` environment variable;
-//! each semispace is half the total. Setting `LO_HEAP_SIZE` small lets the
-//! allocation-pressure tests force a collection deterministically.
+//! overridable at `lo_runtime_init` via the `LO_HEAP_SIZE` environment variable.
+//! Setting `LO_HEAP_SIZE` small lets the allocation-pressure tests force a
+//! collection deterministically.
 //!
 //! The heap pointers are `static mut` raw scalars (the runbook sanctions
 //! `static mut` for the bump pointer). Every access is by value or through a raw
 //! pointer — never `&`/`&mut` of the statics — which keeps this module clear of
 //! the `static_mut_refs` lint. Invariant: only the functions here and the
-//! collector's commit ([`flip`]) touch these, and only on the single runtime
+//! collector's commit ([`set_free`]) touch these, and only on the single runtime
 //! thread.
 
 use core::alloc::Layout;
 use core::ptr;
 
+#[cfg(debug_assertions)]
+use std::collections::HashSet;
+
 use crate::descriptors::LO_STRING_CLASS;
+#[cfg(debug_assertions)]
+use crate::descriptors::LO_EMPTY_STRING;
 use crate::object::{string_data_offset, ClassDescriptor, Object, StringObject};
 
 /// Default total heap size (16 MiB), overridable via `LO_HEAP_SIZE` at init.
 const DEFAULT_HEAP_SIZE: usize = 16 * 1024 * 1024;
-/// All allocations (and each semispace base) are aligned to this; covers
-/// `Object`'s 8-byte pointer field with headroom.
+/// All allocations (and the heap base) are aligned to this; covers `Object`'s
+/// 8-byte pointer field with headroom.
 const HEAP_ALIGN: usize = 16;
 
 /// Base of the whole backing region (for `dealloc`); null when uninitialized.
 static mut HEAP_BASE: *mut u8 = ptr::null_mut();
 /// Layout the region was allocated with (for `dealloc`).
 static mut HEAP_LAYOUT: Option<Layout> = None;
-
-/// Active (from-)space: `[FROM_BASE, FROM_LIMIT)`, bump pointer at `FREE`.
-static mut FROM_BASE: *mut u8 = ptr::null_mut();
-static mut FROM_LIMIT: *mut u8 = ptr::null_mut();
+/// End of the contiguous heap `[HEAP_BASE, HEAP_LIMIT)`. One past the last byte.
+static mut HEAP_LIMIT: *mut u8 = ptr::null_mut();
+/// Bump pointer. Objects occupy `[HEAP_BASE, FREE)`.
 static mut FREE: *mut u8 = ptr::null_mut();
-/// Inactive (to-)space: `[TO_BASE, TO_LIMIT)`. The collector copies survivors
-/// here and then [`flip`]s the roles.
-static mut TO_BASE: *mut u8 = ptr::null_mut();
-static mut TO_LIMIT: *mut u8 = ptr::null_mut();
 
 #[inline]
 const fn align_up(n: usize, align: usize) -> usize {
@@ -56,22 +55,19 @@ const fn align_down(n: usize, align: usize) -> usize {
     n & !(align - 1)
 }
 
-/// Allocate the heap region and carve it into two equal semispaces. Called from
-/// `lo_runtime_init`.
+/// Allocate one contiguous heap region. Called from `lo_runtime_init`.
 pub(crate) fn heap_init() {
     let total = std::env::var("LO_HEAP_SIZE")
         .ok()
         .and_then(|s| s.parse::<usize>().ok())
-        .filter(|&n| n >= 2 * HEAP_ALIGN)
+        .filter(|&n| n >= HEAP_ALIGN)
         .unwrap_or(DEFAULT_HEAP_SIZE);
-    // Each semispace is half the total, rounded down to the heap alignment so
-    // both semispace bases stay aligned. We allocate `2 * semi` so the two
-    // halves are exactly adjacent and equal-size.
-    let semi = align_down(total / 2, HEAP_ALIGN);
-    let region = semi * 2;
-    let layout = Layout::from_size_align(region, HEAP_ALIGN).expect("valid heap layout");
+    // Round down so the heap is never larger than requested and the limit stays
+    // aligned. The filter above keeps `heap_space` non-zero.
+    let heap_space = align_down(total, HEAP_ALIGN);
+    let layout = Layout::from_size_align(heap_space, HEAP_ALIGN).expect("valid heap layout");
     // SAFETY: `layout` has non-zero size; `alloc_zeroed` returns either a valid
-    // zeroed region of `region` bytes or null (handled). Writes below are
+    // zeroed region of `heap_space` bytes or null (handled). Writes below are
     // by-value stores to the allocator statics on the single runtime thread.
     unsafe {
         let base = std::alloc::alloc_zeroed(layout);
@@ -80,11 +76,8 @@ pub(crate) fn heap_init() {
         }
         HEAP_BASE = base;
         HEAP_LAYOUT = Some(layout);
-        FROM_BASE = base;
-        FROM_LIMIT = base.add(semi);
         FREE = base;
-        TO_BASE = base.add(semi);
-        TO_LIMIT = base.add(region);
+        HEAP_LIMIT = base.add(heap_space);
     }
 }
 
@@ -102,17 +95,14 @@ pub(crate) fn heap_shutdown() {
             }
             HEAP_BASE = ptr::null_mut();
             HEAP_LAYOUT = None;
-            FROM_BASE = ptr::null_mut();
-            FROM_LIMIT = ptr::null_mut();
             FREE = ptr::null_mut();
-            TO_BASE = ptr::null_mut();
-            TO_LIMIT = ptr::null_mut();
+            HEAP_LIMIT = ptr::null_mut();
         }
     }
 }
 
-/// Carve `size` zero-initialized bytes from the active semispace and stamp the
-/// object header. On a no-fit, forces one collection and retries; aborts (exit
+/// Carve `size` zero-initialized bytes from the heap and stamp the object
+/// header. On a no-fit, forces one collection and retries; aborts (exit
 /// 137) only if the live set still leaves no room (runbook WS-2 §2.1, ABI §3.1).
 ///
 /// # Safety
@@ -140,16 +130,16 @@ unsafe fn alloc_raw(size: usize, class: *const ClassDescriptor) -> *mut Object {
     obj
 }
 
-/// Try to bump `size` bytes off the active semispace. Returns the carved slot on
-/// success, or null if it does not fit (or the heap is uninitialized).
+/// Try to bump `size` bytes off the heap. Returns the carved slot on success, or
+/// null if it does not fit (or the heap is uninitialized).
 ///
 /// # Safety
 /// Reads/writes the allocator statics on the single runtime thread.
 unsafe fn bump_if_fits(size: usize) -> *mut u8 {
     let bump = FREE;
-    let limit = FROM_LIMIT;
+    let limit = HEAP_LIMIT;
     // Address arithmetic for the bounds check avoids forming an out-of-bounds
-    // pointer when the request would overflow the semispace.
+    // pointer when the request would overflow the heap.
     let new_addr = (bump as usize).wrapping_add(size);
     if bump.is_null() || new_addr > limit as usize {
         return ptr::null_mut();
@@ -160,7 +150,7 @@ unsafe fn bump_if_fits(size: usize) -> *mut u8 {
 
 /// Allocate a zero-initialized object of `class.instance_size` bytes
 /// (`runtime-abi.md` §3.1). Fills in the header. Triggers a collection and
-/// retries on a full semispace; aborts (exit 137) only on live-set overflow.
+/// retries on a full heap; aborts (exit 137) only on live-set overflow.
 ///
 /// Codegen is responsible for finalizing String-typed fields to `LO_EMPTY_STRING`
 /// immediately after this returns (see `runtime-abi.md` §3.1); `lo_alloc` is
@@ -195,45 +185,185 @@ pub(crate) unsafe fn bump_alloc_string(len: u32) -> *mut Object {
 }
 
 // --- Collector interface ----------------------------------------------------
-// These are the seam the Cheney collector (`crate::gc`) drives. They are
-// `pub(crate)` raw-pointer accessors so the collector can range-check from-space,
-// find where to copy survivors, and commit the flip — without re-deriving the
-// heap geometry.
+// The seam the collector (`crate::gc`) drives. `occupied` is the scan range;
+// `set_free` commits the packed bump pointer. The collector does not re-derive
+// the heap geometry.
 
-/// Bounds of the active (from-)space being evacuated: `(base, limit)`.
+/// Objects occupy `[base, free)`. The mark range-check and the left-to-right
+/// scan both stop at `free`; `[free, HEAP_LIMIT)` is unused.
 ///
 /// # Safety
 /// By-value reads of the allocator statics on the single runtime thread.
-pub(crate) unsafe fn from_space() -> (*mut u8, *mut u8) {
-    (FROM_BASE, FROM_LIMIT)
+pub(crate) unsafe fn occupied() -> (*mut u8, *mut u8) {
+    (HEAP_BASE, FREE)
 }
 
-/// Start of the inactive (to-)space — where the collector copies survivors.
+/// Install `new_free` as the bump pointer after compaction. Debug builds fill
+/// the reclaimed tail `[new_free, HEAP_LIMIT)` with `0xEF`, then walk the packed
+/// objects. The fill and the walk are compiled out of release builds, and they
+/// do not depend on the process environment, so the WASM target runs them too.
 ///
+/// The debug heap check verifies shape: descriptors, pointer targets, mark bits, and the
+/// poisoned tail.
+/// 
 /// # Safety
-/// By-value read of the allocator statics on the single runtime thread.
-pub(crate) unsafe fn to_space_base() -> *mut u8 {
-    TO_BASE
-}
-
-/// Commit a collection: swap the from/to roles and install `new_free` as the
-/// bump pointer in the now-active space (which the collector just filled with
-/// survivors). The old from-space becomes the inactive to-space, entirely free
-/// for the next cycle (runbook WS-2 §2.4 step 4).
-///
-/// # Safety
-/// `new_free` must lie within the current to-space `[TO_BASE, TO_LIMIT]`. Called
-/// only by the collector at the end of a cycle, on the single runtime thread.
-pub(crate) unsafe fn flip(new_free: *mut u8) {
-    let (old_from_base, old_from_limit) = (FROM_BASE, FROM_LIMIT);
-    FROM_BASE = TO_BASE;
-    FROM_LIMIT = TO_LIMIT;
-    TO_BASE = old_from_base;
-    TO_LIMIT = old_from_limit;
+/// `new_free` must lie in `[HEAP_BASE, HEAP_LIMIT]`. Called only by the collector
+/// at the end of a cycle, on the single runtime thread.
+pub(crate) unsafe fn set_free(new_free: *mut u8) {
+    debug_assert!({
+        let base = HEAP_BASE;
+        let limit = HEAP_LIMIT;
+        (new_free as usize) >= (base as usize) && (new_free as usize) <= (limit as usize)
+    });
     FREE = new_free;
+    #[cfg(debug_assertions)]
+    {
+        let base = HEAP_BASE;
+        let limit = HEAP_LIMIT;
+        if (limit as usize) > (new_free as usize) {
+            let len = (limit as usize) - (new_free as usize);
+            ptr::write_bytes(new_free, 0xEF, len);
+        }
+        debug_heap_check(base, new_free, limit);
+    }
 }
 
-/// Live bytes currently occupied in the active semispace (`FREE - FROM_BASE`).
+/// Walk the packed heap and the poisoned tail after a collection.
+///
+/// # Safety
+/// `base`, `free`, and `limit` describe the heap just committed by [`set_free`]:
+/// objects occupy `[base, free)` and `[free, limit)` is the `0xEF` tail. A null
+/// `base` (uninitialized heap) is a no-op.
+#[cfg(debug_assertions)]
+unsafe fn debug_heap_check(base: *mut u8, free: *mut u8, limit: *mut u8) {
+    if base.is_null() {
+        return;
+    }
+
+    let mut starts = Vec::new();
+    let mut cur = base;
+    while cur < free {
+        let obj = cur as *mut Object;
+        let size = checked_object_size(obj, base, free, limit);
+        starts.push(cur);
+        cur = cur.add(size);
+    }
+    assert_eq!(cur, free, "object walk did not land on the bump pointer");
+
+    let start_set: HashSet<*mut u8> = starts.iter().copied().collect();
+    let empty = &LO_EMPTY_STRING as *const StringObject as *mut Object;
+    for &start in &starts {
+        let obj = start as *mut Object;
+        let class = (*obj).class_descriptor;
+        let count = (*class).pointer_count as usize;
+        let offsets = (*class).pointer_offsets;
+        for i in 0..count {
+            let off = *offsets.add(i) as usize;
+            let slot = start.add(off) as *const *mut Object;
+            let target = *slot;
+            let ok = target.is_null()
+                || target == empty
+                || start_set.contains(&(target as *mut u8));
+            assert!(
+                ok,
+                "object {:p} field at +{off} points at {:p}, not a live object, null, or LO_EMPTY_STRING",
+                obj, target
+            );
+        }
+    }
+
+    let mut tail = free;
+    while tail < limit {
+        assert_eq!(
+            *tail, 0xEF,
+            "reclaimed byte at {tail:p} is not poisoned"
+        );
+        tail = tail.add(1);
+    }
+}
+
+/// Size of `obj`, after rejecting a header that cannot be a real packed object.
+///
+/// # Safety
+/// `obj` lies in `[base, free)`. `base`, `free`, and `limit` are the committed
+/// heap bounds.
+#[cfg(debug_assertions)]
+unsafe fn checked_object_size(
+    obj: *mut Object,
+    base: *mut u8,
+    free: *mut u8,
+    limit: *mut u8,
+) -> usize {
+    let remaining = (free as usize) - (obj as usize);
+    let class = (*obj).class_descriptor;
+    assert!(
+        !class.is_null(),
+        "heap object at {obj:p} has a null class descriptor"
+    );
+    let class_addr = class as usize;
+    assert!(
+        class_addr < base as usize || class_addr >= limit as usize,
+        "class descriptor {class:p} for object {obj:p} lies inside the heap"
+    );
+    assert_eq!(
+        (*obj).gc_bits, 0,
+        "object {obj:p} still has gc_bits set after collection"
+    );
+
+    let size = if core::ptr::eq(class, &LO_STRING_CLASS) {
+        assert!(
+            remaining >= string_data_offset(),
+            "string at {obj:p} is shorter than its header"
+        );
+        let len = (*(obj as *const StringObject)).length as usize;
+        let raw = string_data_offset().checked_add(len).unwrap_or(usize::MAX);
+        align_up(raw, 8)
+    } else {
+        let raw = (*class).instance_size as usize;
+        assert!(
+            raw >= core::mem::size_of::<Object>(),
+            "object {obj:p} instance_size {raw} is smaller than the header"
+        );
+        align_up(raw, 8)
+    };
+    assert!(
+        size > 0 && size <= remaining,
+        "object {obj:p} size {size} does not fit in the {remaining} bytes left before the bump pointer"
+    );
+
+    let count = (*class).pointer_count as usize;
+    let ptr_size = core::mem::size_of::<*mut Object>();
+    let ptr_align = core::mem::align_of::<*mut Object>();
+    if count == 0 {
+        return size;
+    }
+    assert!(
+        ptr_size > 0 && count <= size / ptr_size,
+        "object {obj:p} pointer_count {count} does not fit in {size} bytes"
+    );
+    let offsets = (*class).pointer_offsets;
+    assert!(
+        !offsets.is_null(),
+        "object {obj:p} has pointer fields but a null offsets array"
+    );
+    let offsets_addr = offsets as usize;
+    assert!(
+        offsets_addr < base as usize || offsets_addr >= limit as usize,
+        "pointer offset array {offsets:p} for object {obj:p} lies inside the heap"
+    );
+    for i in 0..count {
+        let off = *offsets.add(i) as usize;
+        assert!(
+            off % ptr_align == 0
+                && off >= core::mem::size_of::<Object>()
+                && off + ptr_size <= size,
+            "object {obj:p} pointer offset {off} is outside the object or misaligned"
+        );
+    }
+    size
+}
+
+/// Live bytes currently occupied (`FREE - HEAP_BASE`).
 ///
 /// Test/diagnostic hook (not part of the ABI): lets the GC tests observe heap
 /// occupancy drop after a collection reclaims dead objects.
@@ -242,10 +372,10 @@ pub fn heap_used() -> usize {
     // SAFETY: by-value reads of the allocator statics on the single runtime
     // thread. Returns 0 before init (both null).
     unsafe {
-        if FROM_BASE.is_null() {
+        if HEAP_BASE.is_null() {
             0
         } else {
-            (FREE as usize) - (FROM_BASE as usize)
+            (FREE as usize) - (HEAP_BASE as usize)
         }
     }
 }

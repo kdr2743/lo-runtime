@@ -1,28 +1,26 @@
-//! GC operations (`runtime-abi.md` §3.4) — the WS-2 reference **Cheney
-//! two-space copying collector**.
+//! GC operations (`runtime-abi.md` §3.4) — a mark-compact sliding collector.
 //!
 //! `lo_gc_write_barrier` is **provided** as a bare store — the correct
 //! non-generational barrier (Cheney's semispace, mark-compact) out of the box,
-//! and left untouched here (runbook WS-2 §2.6). `lo_gc_collect` performs a flip,
-//! a root scan, and a Cheney scan over the to-space (runbook WS-2 §2.4); the
-//! allocator's OOM path (`crate::alloc`) drives it.
+//! and left untouched here (runbook WS-2 §2.6). `lo_gc_collect` marks from the
+//! shadow stack, slides live objects to the start of the heap, and rewrites
+//! roots and pointer fields. The allocator's OOM path (`crate::alloc`) drives it.
 //!
-//! ## Forwarding-flag bit (decision (C))
+//! ## Mark bit
 //!
-//! Bit 0 of `gc_bits` (`GC_FORWARDED_BIT == 0b1`) is the **forwarding flag**: set
-//! on a from-space object once it has been evacuated, at which point its
-//! `class_descriptor` slot holds the new to-space address instead of a descriptor
-//! pointer (the tombstone). The bit is collector-private — no two menu collectors
-//! run on one heap — so it needs no ABI pin. All three skeletons (Rust / Zig /
-//! C++) use this same bit so cross-skeleton header encoding stays byte-identical.
+//! Bit 0 of `gc_bits` (`GC_MARK_BIT == 0b1`) is set on a live object before its
+//! pointer fields are traced. The bit is collector-private — no two menu
+//! collectors run on one heap — so it needs no ABI pin. The slide clears it on
+//! the relocated object.
+
+use std::collections::HashMap;
 
 use crate::descriptors::LO_STRING_CLASS;
-use crate::object::{
-    shadow_frame_roots_offset, string_data_offset, ClassDescriptor, Object, StringObject,
-};
+use crate::object::{shadow_frame_roots_offset, string_data_offset, Object, StringObject};
 
-/// Forwarding-flag bit in `gc_bits` (decision (C)). See module docs.
-pub(crate) const GC_FORWARDED_BIT: u32 = 0b1;
+/// Mark bit in `gc_bits` for the mark-compact collector. Set before a marked
+/// object's pointer fields are traced, so a cycle returns instead of looping.
+const GC_MARK_BIT: u32 = 0b1;
 
 /// Pointer-store write barrier. Non-generational implementation: a bare store of
 /// `value` into the pointer field at `obj + field_offset` (`runtime-abi.md` §3.4).
@@ -43,14 +41,14 @@ pub unsafe extern "C" fn lo_gc_write_barrier(
     *slot = value;
 }
 
-/// Force a collection (`runtime-abi.md` §3.4): a Cheney flip-and-scan cycle.
-/// Reachable objects are copied to the inactive semispace with their interior
-/// pointers and the shadow-stack roots rewritten to the new addresses;
-/// unreachable objects are reclaimed when the old space is abandoned.
+/// Force a collection (`runtime-abi.md` §3.4): one mark-compact cycle.
+/// Reachable objects slide to the start of the heap. Roots and pointer fields
+/// are rewritten to the new addresses; unreachable objects are reclaimed.
 #[no_mangle]
 pub extern "C" fn lo_gc_collect() {
-    // SAFETY: single-threaded runtime; the heap is initialized (a collect before
-    // `heap_init` walks an empty root set and flips empty semispaces — a no-op).
+    // SAFETY: single-threaded runtime. A collect before `heap_init` walks an
+    // empty root set over an empty occupied range and commits `FREE` at the
+    // heap base — a no-op.
     unsafe { collect() }
 }
 
@@ -59,14 +57,13 @@ const fn align8(n: usize) -> usize {
     (n + 7) & !7
 }
 
-/// True byte size of a heap object — the count `forward` copies and the stride
-/// `scan` advances by (runbook WS-2 §2.2). Strings are variable-size: their inline
-/// UTF-8 tail starts at `offset_of(StringObject, data)` (= 20 on 64-bit), **not**
-/// `size_of` — the offset-of-not-size-of rule (`runtime-abi.md` §2.2).
+/// True byte size of a heap object — the stride the scan advances by. Strings
+/// are variable-size: their inline UTF-8 tail starts at `offset_of(StringObject,
+/// data)` (= 20 on 64-bit), **not** `size_of` — the offset-of-not-size-of rule
+/// (`runtime-abi.md` §2.2).
 ///
 /// # Safety
-/// `p` must point at a valid object whose `class_descriptor` is intact (a live
-/// from-space object before its tombstone is installed, or a to-space copy).
+/// `p` must point at a valid object whose `class_descriptor` is intact.
 unsafe fn object_size(p: *mut Object) -> usize {
     let class = (*p).class_descriptor;
     if core::ptr::eq(class, &LO_STRING_CLASS) {
@@ -77,120 +74,119 @@ unsafe fn object_size(p: *mut Object) -> usize {
     }
 }
 
-/// Evacuate `p` from the from-space `[from_base, from_limit)` into the to-space,
-/// bumping `free` (runbook WS-2 §2.3). Returns `p`'s new address. Null and
-/// non-from-space (immortal / `.rodata`, e.g. `LO_EMPTY_STRING`) pointers are
-/// returned untouched — the range-check is what keeps immortal objects safe with
-/// no special case. An already-evacuated object (forwarding bit set) returns the
-/// new address stored in its clobbered `class_descriptor` slot.
+/// Mark `p` and every heap object reachable through its pointer fields.
 ///
-/// Order matters: the size is read and the bytes copied **before** the original's
-/// `class_descriptor` is overwritten, because both reads need the intact
-/// descriptor. The copy carries the intact descriptor into to-space with the
-/// forwarding flag still clear; only the original becomes a tombstone.
+/// A pointer outside `[heap_base, free)` — null, `LO_EMPTY_STRING`, or any other
+/// non-heap address — is ignored and not entered. The mark bit is set before
+/// recursing, so a cycle hits an already-marked object and returns. The slot
+/// that held `p` is left unchanged; repair rewrites pointers later.
 ///
 /// # Safety
-/// `p` is null or a valid object pointer. `free` points at enough room in to-space
-/// for the largest live object. Single-threaded.
-unsafe fn forward(
-    p: *mut Object,
-    from_base: *mut u8,
-    from_limit: *mut u8,
-    free: &mut *mut u8,
-) -> *mut Object {
-    if p.is_null() {
-        return p;
-    }
+/// `heap_base` and `free` are the occupied range from [`crate::alloc::occupied`].
+/// `p` is null, a pointer outside that range, or a valid object inside it whose
+/// `class_descriptor` is intact. Single-threaded.
+unsafe fn mark(p: *mut Object, heap_base: *mut u8, free: *mut u8) {
     let addr = p as *mut u8;
-    if addr < from_base || addr >= from_limit {
-        return p; // immortal / non-heap: leave untouched
+    if addr < heap_base || addr >= free {
+        return;
     }
-    if (*p).gc_bits & GC_FORWARDED_BIT != 0 {
-        // Already moved; the class_descriptor slot holds the new address.
-        return (*p).class_descriptor as *mut Object;
+    if (*p).gc_bits & GC_MARK_BIT != 0 {
+        return;
     }
-    let n = object_size(p);
-    let dst = *free;
-    core::ptr::copy_nonoverlapping(addr, dst, n);
-    // Install the tombstone in the *original* — after the copy, so the to-space
-    // copy keeps the intact descriptor and a clear forwarding flag.
-    (*p).class_descriptor = dst as *const ClassDescriptor;
-    (*p).gc_bits |= GC_FORWARDED_BIT;
-    *free = dst.add(n);
-    dst as *mut Object
+    (*p).gc_bits |= GC_MARK_BIT;
+
+    let class = (*p).class_descriptor;
+    let count = (*class).pointer_count as usize;
+    let offsets = (*class).pointer_offsets;
+    for i in 0..count {
+        let off = *offsets.add(i) as usize;
+        let slot = (p as *mut u8).add(off) as *mut *mut Object;
+        mark(*slot, heap_base, free);
+    }
 }
 
-/// One Cheney collection cycle (runbook WS-2 §2.4).
+/// One mark-compact cycle. Marks from the shadow stack, slides live objects
+/// toward `HEAP_BASE`, rewrites roots and pointer fields, then commits the
+/// packed bump pointer.
 ///
 /// # Safety
-/// Single-threaded; the allocator statics describe a valid two-semispace heap (or
-/// a null/uninitialized heap, in which case both spaces are empty and this is a
-/// no-op).
+/// Single-threaded. The allocator statics describe a valid heap, or a
+/// null/uninitialized heap, in which case the occupied range is empty and this
+/// commits `FREE` at the base — a no-op.
 unsafe fn collect() {
-    let (from_base, from_limit) = crate::alloc::from_space();
-    let to_base = crate::alloc::to_space_base();
-    let mut free = to_base;
-    let mut scan = to_base;
-
-    // 1–2. Scan the root set: every slot of every shadow-stack frame, walking
-    // `current_frame` -> `parent` to null (ABI §3.3). The shadow stack is the
-    // complete root set.
+    // Mark. Reachable heap objects get GC_MARK_BIT. `mark` follows pointer
+    // fields itself, so this loop only visits roots. Slots keep their pre-move
+    // pointers; the repair pass rewrites them later.
+    let (heap_base, heap_free) = crate::alloc::occupied();
     let mut frame = crate::shadow_stack::current_frame();
     while !frame.is_null() {
         let num = (*frame).num_roots as usize;
         let roots_base = (frame as *mut u8).add(shadow_frame_roots_offset());
         for i in 0..num {
             let slot = roots_base.add(i * core::mem::size_of::<*mut Object>()) as *mut *mut Object;
-            *slot = forward(*slot, from_base, from_limit, &mut free);
+            mark(*slot, heap_base, heap_free);
         }
         frame = (*frame).parent;
     }
 
-    // 3. Cheney loop: scan copied objects in to-space, forwarding each pointer
-    // field, until `scan` catches `free`. Strings have `pointer_count == 0`, so
-    // they only advance `scan` — but `object_size` still uses the variable-size
-    // branch to advance correctly.
-    while scan < free {
-        let obj = scan as *mut Object;
+    // Scan cursors. `cur` walks every object in `[heap_base, heap_free)`.
+    // `new_free` is the packed address of the next live object. `forwarding`
+    // maps each live object's old address to that packed address.
+    let mut forwarding: HashMap<*mut Object, *mut Object> = HashMap::new();
+    let mut cur = heap_base;
+    let mut new_free = heap_base;
+
+    // Walk every object in `[heap_base, heap_free)`. `cur` steps by object size,
+    // marked or not. A marked object is recorded and slid to `new_free` only
+    // after `next` is saved, because the copy can overlap the source.
+    while cur < heap_free {
+        let obj = cur as *mut Object;
+        let size = object_size(obj);
+        let next = cur.add(size);
+        if (*obj).gc_bits & GC_MARK_BIT != 0 {
+            let dst = new_free as *mut Object;
+            forwarding.insert(obj, dst);
+            core::ptr::copy(cur, new_free, size);
+            (*dst).gc_bits = 0;
+            new_free = new_free.add(size);
+        }
+        cur = next;
+    }
+
+    // Repair roots. Each slot still holds a pre-move address. A hit in
+    // `forwarding` is rewritten; null and non-heap pointers are left alone.
+    frame = crate::shadow_stack::current_frame();
+    while !frame.is_null() {
+        let num = (*frame).num_roots as usize;
+        let roots_base = (frame as *mut u8).add(shadow_frame_roots_offset());
+        for i in 0..num {
+            let slot = roots_base.add(i * core::mem::size_of::<*mut Object>()) as *mut *mut Object;
+            if let Some(&updated) = forwarding.get(&*slot) {
+                *slot = updated;
+            }
+        }
+        frame = (*frame).parent;
+    }
+
+    // Repair pointer fields on the relocated objects. The old address may
+    // already have been overwritten, so each object is read at its new address.
+    // Copied fields still hold pre-move pointers; a map miss is left unchanged.
+    let relocated: Vec<*mut Object> = forwarding.values().copied().collect();
+    for obj in relocated {
         let class = (*obj).class_descriptor;
         let count = (*class).pointer_count as usize;
         let offsets = (*class).pointer_offsets;
         for i in 0..count {
             let off = *offsets.add(i) as usize;
             let slot = (obj as *mut u8).add(off) as *mut *mut Object;
-            *slot = forward(*slot, from_base, from_limit, &mut free);
+            if let Some(&updated) = forwarding.get(&*slot) {
+                *slot = updated;
+            }
         }
-        scan = scan.add(object_size(obj));
     }
 
-    // 4. Commit: swap the semispace roles; the old from-space is now free.
-    crate::alloc::flip(free);
-
-    // Debug instrumentation (off unless `LO_GC_POISON` is set): scribble the
-    // just-abandoned from-space with a poison byte. Survivors were already copied
-    // out to the new from-space, so this only clobbers garbage and tombstones —
-    // but it turns any *stale* pointer (one the collector did not relocate because
-    // it was not a registered root) into a deterministic read of `0xEFEFEFEF…`
-    // instead of its possibly-still-intact old bytes. That makes a missing
-    // GC root a hard failure rather than a flaky one (see the WS-11 GC-rooting
-    // stress test). Not part of the ABI; zero cost when disabled.
-    if poison_enabled() {
-        let len = (from_limit as usize) - (from_base as usize);
-        core::ptr::write_bytes(from_base, 0xEF, len);
-    }
-}
-
-/// Whether `LO_GC_POISON` requests poisoning the abandoned from-space after each
-/// collection (debug aid; see `collect`). Read once and cached. Always false on
-/// freestanding WASM (no environment).
-fn poison_enabled() -> bool {
-    use std::sync::OnceLock;
-    static POISON: OnceLock<bool> = OnceLock::new();
-    *POISON.get_or_init(|| {
-        std::env::var("LO_GC_POISON")
-            .map(|v| !v.is_empty() && v != "0")
-            .unwrap_or(false)
-    })
+    // Commit the packed bump pointer. A debug build poisons the reclaimed tail.
+    crate::alloc::set_free(new_free);
 }
 
 #[cfg(test)]
@@ -271,15 +267,16 @@ mod tests {
         *((obj as *mut u8).add(off) as *mut *mut Object)
     }
 
-    // (i) A known live graph survives: reachable objects are preserved with
-    // updated addresses, and both the root slot and the interior pointer field
-    // are rewritten to the new locations.
+    // (i) A known live graph survives. A dead node sits to the left so sliding
+    // compaction actually moves the live nodes; the root and the interior
+    // pointer are both rewritten, and the graph shape is preserved.
     #[test]
     fn live_graph_preserved_and_pointers_rewritten() {
         with_runtime(None, || unsafe {
             let mut frame = TestFrame::<1>::new();
             lo_push_frame(frame.as_frame());
 
+            let _dead = lo_alloc(&NODE_CLASS); // unrooted, so a and b slide left
             let a = lo_alloc(&NODE_CLASS);
             let b = lo_alloc(&NODE_CLASS);
             set_field(a, 16, b); // a.next = b
@@ -348,7 +345,6 @@ mod tests {
             lo_gc_collect();
 
             let s2 = frame.roots[0];
-            assert_ne!(s2, s, "string must move to to-space");
             assert_eq!((*s2).class_descriptor, &LO_STRING_CLASS as *const _);
             let so = s2 as *const StringObject;
             assert_eq!((*so).length, bytes.len() as u32);
@@ -363,9 +359,9 @@ mod tests {
         });
     }
 
-    // (iv) LO_EMPTY_STRING is immortal: a moved object's field that references it
-    // still points at the same `.rodata` address after collection (forward's
-    // range-check leaves non-from-space pointers untouched — no special case).
+    // (iv) LO_EMPTY_STRING is immortal: a field that references it still points
+    // at the same `.rodata` address after collection. The holder is the first
+    // object, so sliding compaction leaves it in place.
     #[test]
     fn empty_string_not_moved() {
         with_runtime(None, || unsafe {
@@ -380,7 +376,6 @@ mod tests {
             lo_gc_collect();
 
             let holder2 = frame.roots[0];
-            assert_ne!(holder2, holder, "holder itself moves");
             let field = get_field(holder2, 16);
             assert_eq!(
                 field, empty,
