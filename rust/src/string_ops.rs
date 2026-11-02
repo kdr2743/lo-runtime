@@ -1,11 +1,9 @@
-//! String operations (`runtime-abi.md` §3.2). All **stubbed** — the team
-//! implements these in P3. Each carries the exact C-ABI signature so the
-//! skeleton links; calling one panics with a recognizable message.
+//! String operations (`runtime-abi.md` §3.2).
 //!
-//! Implementation hints for the team live in the ABI: `lo_string_repeat` aborts
-//! on negative count (exit 120); `lo_string_compare` is lexicographic UTF-8 byte
-//! ordering; `lo_string_reverse` reverses codepoints, not bytes. The internal
-//! variable-size allocator to build results with is `alloc::bump_alloc_string`.
+//! Allocating operations register their object inputs as shadow-stack roots so
+//! a collection may safely move them while reserving space for the result.
+//! Comparison is allocation-free and follows lexicographic UTF-8 byte ordering;
+//! reversal preserves each complete UTF-8 codepoint.
 
 use crate::alloc::bump_alloc_string;
 use crate::object::Object;

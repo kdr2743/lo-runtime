@@ -1,10 +1,8 @@
 //! LO runtime skeleton (Rust) — CS 378H Compilers, Fall 2026.
 //!
 //! This crate implements the shared LO runtime ABI (`runtime-abi.md`). The
-//! implemented entry points (nursery allocation, generational GC, shadow stack,
-//! I/O, lifecycle, descriptors) work out of the box; the stubbed string ops and
-//! casts carry the correct C-ABI signature and panic with a recognizable
-//! message until a team implements them in P3.
+//! implemented entry points include nursery allocation, generational GC,
+//! shadow-stack management, strings, casts, I/O, lifecycle, and descriptors.
 //!
 //! Module layout mirrors the other two skeletons:
 //! - [`object`] — ABI-visible type definitions.
@@ -14,7 +12,8 @@
 //! - [`init`] — runtime lifecycle.
 //! - [`io`] — print / read / EOF.
 //! - [`gc`] — generational copying collector and remembered-set write barrier.
-//! - [`string_ops`], [`cast`] — stubs.
+//! - [`string_ops`] — UTF-8 string construction and primitive operations.
+//! - [`cast`] — runtime cast and `instanceof` checks.
 //! - [`abort`] — runtime abort paths + `lo_abort_null_receiver`.
 //!
 //! Allocation, collection, and shadow-stack traversal use raw pointers under
