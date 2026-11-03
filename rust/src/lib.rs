@@ -1,24 +1,24 @@
 //! LO runtime skeleton (Rust) — CS 378H Compilers, Fall 2026.
 //!
 //! This crate implements the shared LO runtime ABI (`runtime-abi.md`). The
-//! *provided* entry points (allocation, shadow stack, I/O, write barrier,
-//! lifecycle, descriptors) work out of the box; the *stubbed* ones (GC, string
-//! ops, casts) carry the correct C-ABI signature and panic with a recognizable
+//! implemented entry points (nursery allocation, generational GC, shadow stack,
+//! I/O, lifecycle, descriptors) work out of the box; the stubbed string ops and
+//! casts carry the correct C-ABI signature and panic with a recognizable
 //! message until a team implements them in P3.
 //!
 //! Module layout mirrors the other two skeletons:
 //! - [`object`] — ABI-visible type definitions.
 //! - [`descriptors`] — built-in class descriptors + the `LO_EMPTY_STRING` singleton.
-//! - [`alloc`] — bump allocator behind `lo_alloc`.
+//! - [`alloc`] — nursery bump allocation and tenured heap regions.
 //! - [`shadow_stack`] — root-tracking frame list.
 //! - [`init`] — runtime lifecycle.
 //! - [`io`] — print / read / EOF.
-//! - [`gc`] — write barrier (provided) + collect (stub).
+//! - [`gc`] — generational copying collector and remembered-set write barrier.
 //! - [`string_ops`], [`cast`] — stubs.
 //! - [`abort`] — runtime abort paths + `lo_abort_null_receiver`.
 //!
-//! `unsafe` is contained to the FFI boundary and the allocator / shadow-stack
-//! modules, each access commented with the invariant it relies on.
+//! Allocation, collection, and shadow-stack traversal use raw pointers under
+//! the single-threaded runtime and ABI layout invariants.
 
 mod abort;
 mod alloc;
@@ -61,6 +61,6 @@ pub use string_ops::{
 
 // Debug/test hooks (not part of the ABI).
 #[doc(hidden)]
-pub use alloc::heap_used;
+pub use alloc::{heap_size, heap_used};
 #[doc(hidden)]
 pub use shadow_stack::current_frame;
