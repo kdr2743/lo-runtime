@@ -1,0 +1,48 @@
+// good test case
+// GC stress: a window of 60000 linked nodes slides over 4000000 allocations: each node outlives the nursery, is promoted, and then dies in tenured space, so tenured space fills with garbage and many major collections run while the window stays intact; the final window checksum must match an independently computed value
+// main method return value: 0
+// gc stress heap: 8388608
+
+class Node ( int id; Node next; ) [
+    Node(int i, Node n) { id = i; next = n; }
+] {
+    int get_id() { return id; }
+    Node get_next() { return next; }
+    void set_next(Node n) { next = n; }
+}
+
+class Main ( ) {
+    int main() {
+        Node head;
+        Node tail;
+        Node n;
+        Node cur;
+        int i;
+        int sum;
+        head = new Node(0, null);
+        tail = head;
+        i = 1;
+        while ( (i < 60000) ) {
+            n = new Node(i, null);
+            tail.set_next(n);
+            tail = n;
+            i = (i + 1);
+        }
+        while ( (i < 4000000) ) {
+            n = new Node(i, null);
+            tail.set_next(n);
+            tail = n;
+            head = head.get_next();
+            i = (i + 1);
+        }
+        sum = 0;
+        cur = head;
+        while ( (! (cur = null)) ) {
+            sum = (sum + cur.get_id());
+            cur = cur.get_next();
+        }
+        out.print_int(sum);
+        out.println();
+        return 0;
+    }
+}

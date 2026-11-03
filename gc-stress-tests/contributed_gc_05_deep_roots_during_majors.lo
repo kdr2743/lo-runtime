@@ -1,0 +1,87 @@
+// good test case
+// GC stress: recursion 1000 frames deep keeps a fresh object and the caller's object live in every frame, and at the bottom a 20000-node sliding window promotes and drops 2000000 nodes, so every major collection must forward 1000 frames of roots; on the way back up every frame must still see the objects it created
+// main method return value: 0
+// gc stress heap: 4194304
+
+class Node ( int id; Node next; ) [
+    Node(int i, Node n) { id = i; next = n; }
+] {
+    int get_id() { return id; }
+    Node get_next() { return next; }
+    void set_next(Node n) { next = n; }
+}
+
+class Probe ( int id; ) [
+    Probe(int i) { id = i; }
+] {
+    int get_id() { return id; }
+}
+
+class Rec ( ) [
+    Rec() { ; }
+] {
+    int window() {
+        Node head;
+        Node tail;
+        Node n;
+        Node cur;
+        int i;
+        int sum;
+        head = new Node(0, null);
+        tail = head;
+        i = 1;
+        while ( (i < 20000) ) {
+            n = new Node(i, null);
+            tail.set_next(n);
+            tail = n;
+            i = (i + 1);
+        }
+        while ( (i < 2000000) ) {
+            n = new Node(i, null);
+            tail.set_next(n);
+            tail = n;
+            head = head.get_next();
+            i = (i + 1);
+        }
+        sum = 0;
+        cur = head;
+        while ( (! (cur = null)) ) {
+            sum = (sum + cur.get_id());
+            cur = cur.get_next();
+        }
+        out.print_int(sum);
+        out.println();
+        return 0;
+    }
+    int descend(int depth, Probe carried) {
+        Probe mine;
+        int below;
+        mine = new Probe(depth);
+        if ( (depth = 1000) ) {
+            below = this.window();
+        } else {
+            below = this.descend((depth + 1), mine);
+        }
+        if ( (! (mine.get_id() = depth)) ) {
+            return (0 - 1000000);
+        } else {
+            ;
+        }
+        if ( (! (carried.get_id() = (depth - 1))) ) {
+            return (0 - 2000000);
+        } else {
+            ;
+        }
+        return (below + depth);
+    }
+}
+
+class Main ( ) {
+    int main() {
+        Rec r;
+        r = new Rec();
+        out.print_int(r.descend(1, new Probe(0)));
+        out.println();
+        return 0;
+    }
+}

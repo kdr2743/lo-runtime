@@ -1,0 +1,81 @@
+// good test case
+// GC stress: a 60000-node list stays live while a 40000-node sliding window promotes and drops 4000000 nodes, so every major collection must copy the whole 60000-node list plus the window and rewrite every pointer; the list must still be in order and complete afterwards
+// main method return value: 0
+// gc stress heap: 16777216
+
+class Node ( int id; Node next; ) [
+    Node(int i, Node n) { id = i; next = n; }
+] {
+    int get_id() { return id; }
+    Node get_next() { return next; }
+    void set_next(Node n) { next = n; }
+}
+
+class Main ( ) {
+    int main() {
+        Node list;
+        Node cur;
+        Node head;
+        Node tail;
+        Node n;
+        int i;
+        int count;
+        int sum;
+        int wsum;
+        int prev;
+        int ordered;
+        list = null;
+        i = 1;
+        while ( (i < 60001) ) {
+            list = new Node(i, list);
+            i = (i + 1);
+        }
+        head = new Node(0, null);
+        tail = head;
+        i = 1;
+        while ( (i < 40000) ) {
+            n = new Node(i, null);
+            tail.set_next(n);
+            tail = n;
+            i = (i + 1);
+        }
+        while ( (i < 4000000) ) {
+            n = new Node(i, null);
+            tail.set_next(n);
+            tail = n;
+            head = head.get_next();
+            i = (i + 1);
+        }
+        count = 0;
+        sum = 0;
+        ordered = 1;
+        prev = (60001 + 0);
+        cur = list;
+        while ( (! (cur = null)) ) {
+            count = (count + 1);
+            sum = (sum + cur.get_id());
+            if ( (cur.get_id() < prev) ) {
+                ;
+            } else {
+                ordered = 0;
+            }
+            prev = cur.get_id();
+            cur = cur.get_next();
+        }
+        wsum = 0;
+        cur = head;
+        while ( (! (cur = null)) ) {
+            wsum = (wsum + cur.get_id());
+            cur = cur.get_next();
+        }
+        out.print_int(count);
+        out.println();
+        out.print_int(sum);
+        out.println();
+        out.print_int(ordered);
+        out.println();
+        out.print_int(wsum);
+        out.println();
+        return 0;
+    }
+}
