@@ -1,0 +1,55 @@
+// good test case
+// GC stress: 12000 long-lived holder objects are overwritten round-robin with fresh objects 3000000 times, so almost every store is old-to-young and each minor collection must find thousands of remembered objects; every holder must end up pointing at its last stored value
+// main method return value: 0
+// gc stress heap: 4194304
+
+class Payload ( int v; ) [
+    Payload(int x) { v = x; }
+] {
+    int get() { return v; }
+}
+
+class Holder ( Payload ref; Holder next; ) [
+    Holder(Payload p, Holder n) { ref = p; next = n; }
+] {
+    void set(Payload p) { ref = p; }
+    Payload get_ref() { return ref; }
+    Holder get_next() { return next; }
+}
+
+class Main ( ) {
+    int main() {
+        Holder first;
+        Holder cur;
+        int i;
+        int it;
+        int sum;
+        first = null;
+        i = 0;
+        while ( (i < 12000) ) {
+            first = new Holder(new Payload(0), first);
+            i = (i + 1);
+        }
+        cur = first;
+        it = 0;
+        while ( (it < 3000000) ) {
+            cur.set(new Payload(it));
+            cur = cur.get_next();
+            if ( (cur = null) ) {
+                cur = first;
+            } else {
+                ;
+            }
+            it = (it + 1);
+        }
+        sum = 0;
+        cur = first;
+        while ( (! (cur = null)) ) {
+            sum = (sum + (cur.get_ref()).get());
+            cur = cur.get_next();
+        }
+        out.print_int(sum);
+        out.println();
+        return 0;
+    }
+}

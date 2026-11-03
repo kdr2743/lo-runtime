@@ -1,0 +1,78 @@
+// good test case
+// GC stress: every 3000 allocations an old holder is pointed at a fresh young object and a 300 KB string, larger than the nursery, is then allocated straight into tenured space; tenured space is full of dead promoted nodes, so the string allocation forces a major collection while the young object is reachable only through the old holder, which must still read back the stored value
+// main method return value: 0
+// gc stress heap: 4194304
+
+class Node ( int id; Node next; ) [
+    Node(int i, Node n) { id = i; next = n; }
+] {
+    int get_id() { return id; }
+    Node get_next() { return next; }
+    void set_next(Node n) { next = n; }
+}
+class Box ( Payload ref; ) [
+    Box() { ref = null; }
+] {
+    void set(Payload p) { ref = p; }
+    Payload get() { return ref; }
+}
+class Payload ( int v; ) [
+    Payload(int x) { v = x; }
+] {
+    int get() { return v; }
+}
+
+class Main ( ) {
+    int main() {
+        Node head;
+        Node tail;
+        Node n;
+        Node cur;
+        Box box;
+        String t;
+        int i;
+        int bad;
+        int sum;
+        box = new Box();
+        box.set(new Payload(0));
+        head = new Node(0, null);
+        tail = head;
+        i = 1;
+        while ( (i < 20000) ) {
+            n = new Node(i, null);
+            tail.set_next(n);
+            tail = n;
+            i = (i + 1);
+        }
+        bad = 0;
+        while ( (i < 3000000) ) {
+            n = new Node(i, null);
+            tail.set_next(n);
+            tail = n;
+            head = head.get_next();
+            if ( ((i % 3000) = 0) ) {
+                box.set(new Payload(i));
+                t = ("0123456789abcdef" * 19200);
+                if ( (! ((box.get()).get() = i)) ) {
+                    bad = (bad + 1);
+                } else {
+                    ;
+                }
+            } else {
+                ;
+            }
+            i = (i + 1);
+        }
+        sum = 0;
+        cur = head;
+        while ( (! (cur = null)) ) {
+            sum = (sum + cur.get_id());
+            cur = cur.get_next();
+        }
+        out.print_int(bad);
+        out.println();
+        out.print_int(sum);
+        out.println();
+        return 0;
+    }
+}

@@ -1,0 +1,58 @@
+test,runtime,target,config,exit_code,result,wall_ms,note
+contributed_gc_01_promote_then_die,cheney,wasm,default heap,0,PASS,234,
+contributed_gc_01_promote_then_die,markcompact,wasm,default heap,0,PASS,246,
+contributed_gc_01_promote_then_die,generational,wasm,default heap,0,PASS,260,
+contributed_gc_01_promote_then_die,modified-generational,wasm,default heap,0,PASS,271,
+contributed_gc_01_promote_then_die,broken-barrier,wasm,default heap,0,FAIL,243,
+contributed_gc_01_promote_then_die,broken-major-roots,wasm,default heap,0,FAIL,265,
+contributed_gc_02_major_with_large_live_graph,cheney,wasm,default heap,0,PASS,247,
+contributed_gc_02_major_with_large_live_graph,markcompact,wasm,default heap,0,PASS,255,
+contributed_gc_02_major_with_large_live_graph,generational,wasm,default heap,0,PASS,280,
+contributed_gc_02_major_with_large_live_graph,modified-generational,wasm,default heap,0,PASS,317,
+contributed_gc_02_major_with_large_live_graph,broken-barrier,wasm,default heap,0,PASS,321,
+contributed_gc_02_major_with_large_live_graph,broken-major-roots,wasm,default heap,134,FAIL,306,"wasmrun: unclassified guest trap:
+error while executing at wasm backtrace:
+    0:    0xb30 - contributed_gc_02_major_with_large_live_graph.wasm!m.Main.main
+    1:   0x1cd1 - contributed_gc_02_major_wi"
+contributed_gc_03_barrier_storm,cheney,wasm,default heap,0,PASS,175,
+contributed_gc_03_barrier_storm,markcompact,wasm,default heap,0,PASS,175,
+contributed_gc_03_barrier_storm,generational,wasm,default heap,0,PASS,203,
+contributed_gc_03_barrier_storm,modified-generational,wasm,default heap,0,PASS,206,
+contributed_gc_03_barrier_storm,broken-barrier,wasm,default heap,0,PASS,172,
+contributed_gc_03_barrier_storm,broken-major-roots,wasm,default heap,0,PASS,196,
+contributed_gc_04_large_alloc_forces_major,cheney,wasm,default heap,0,PASS,334,
+contributed_gc_04_large_alloc_forces_major,markcompact,wasm,default heap,0,PASS,328,
+contributed_gc_04_large_alloc_forces_major,generational,wasm,default heap,0,PASS,346,
+contributed_gc_04_large_alloc_forces_major,modified-generational,wasm,default heap,0,PASS,363,
+contributed_gc_04_large_alloc_forces_major,broken-barrier,wasm,default heap,0,FAIL,333,
+contributed_gc_04_large_alloc_forces_major,broken-major-roots,wasm,default heap,134,FAIL,45,"wasmrun: unclassified guest trap:
+error while executing at wasm backtrace:
+    0:   0x1139 - contributed_gc_04_large_alloc_forces_major.wasm!m.Main.main
+    1:   0x1f45 - contributed_gc_04_large_alloc"
+contributed_gc_05_deep_roots_during_majors,cheney,wasm,default heap,0,PASS,118,
+contributed_gc_05_deep_roots_during_majors,markcompact,wasm,default heap,0,PASS,123,
+contributed_gc_05_deep_roots_during_majors,generational,wasm,default heap,0,PASS,138,
+contributed_gc_05_deep_roots_during_majors,modified-generational,wasm,default heap,0,PASS,147,
+contributed_gc_05_deep_roots_during_majors,broken-barrier,wasm,default heap,0,PASS,135,
+contributed_gc_05_deep_roots_during_majors,broken-major-roots,wasm,default heap,134,FAIL,144,"wasmrun: unclassified guest trap:
+error while executing at wasm backtrace:
+    0:   0x14f3 - contributed_gc_05_deep_roots_during_majors.wasm!m.Rec.descend
+    1:   0x1451 - contributed_gc_05_deep_root"
+contributed_gc_06_cycle_across_generations,cheney,wasm,default heap,0,PASS,159,
+contributed_gc_06_cycle_across_generations,markcompact,wasm,default heap,0,PASS,162,
+contributed_gc_06_cycle_across_generations,generational,wasm,default heap,0,PASS,186,
+contributed_gc_06_cycle_across_generations,modified-generational,wasm,default heap,0,PASS,203,
+contributed_gc_06_cycle_across_generations,broken-barrier,wasm,default heap,0,PASS,174,
+contributed_gc_06_cycle_across_generations,broken-major-roots,wasm,default heap,0,PASS,202,
+contributed_abi_01_forced_collections_on_a_cyclic_ring,cheney,wasm,C harness,0,PASS,265,
+contributed_abi_02_forced_collect_young_reachable_only_through_old,cheney,wasm,C harness,0,PASS,132,
+contributed_abi_01_forced_collections_on_a_cyclic_ring,markcompact,wasm,C harness,0,PASS,157,
+contributed_abi_02_forced_collect_young_reachable_only_through_old,markcompact,wasm,C harness,0,PASS,79,
+contributed_abi_01_forced_collections_on_a_cyclic_ring,generational,wasm,C harness,0,PASS,164,
+contributed_abi_02_forced_collect_young_reachable_only_through_old,generational,wasm,C harness,0,PASS,82,
+contributed_abi_01_forced_collections_on_a_cyclic_ring,modified-generational,wasm,C harness,0,PASS,157,
+contributed_abi_02_forced_collect_young_reachable_only_through_old,modified-generational,wasm,C harness,0,PASS,79,
+contributed_abi_01_forced_collections_on_a_cyclic_ring,broken-barrier,wasm,C harness,0,PASS,154,
+contributed_abi_02_forced_collect_young_reachable_only_through_old,broken-barrier,wasm,C harness,0,PASS,77,
+contributed_abi_01_forced_collections_on_a_cyclic_ring,broken-major-roots,wasm,C harness,1,FAIL,156,(stdout differs)
+contributed_abi_02_forced_collect_young_reachable_only_through_old,broken-major-roots,wasm,C harness,0,PASS,78,
