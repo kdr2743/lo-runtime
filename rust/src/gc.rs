@@ -1,7 +1,7 @@
 //! Generational copying GC (`runtime-abi.md` §3.4) with immediate promotion.
 //!
 //! Minor collections copy nursery survivors into the active tenured tail,
-//! tracing shadow-stack roots and a HashSet of remembered old objects. Major
+//! tracing shadow-stack roots and a HashSet of remembered old pointer slots. Major
 //! collections trace the nursery and active tenured space into the spare tenured
 //! space, then flip. Both use a Cheney scan and leave the nursery empty.
 //!
@@ -25,10 +25,11 @@ use crate::object::{
     shadow_frame_roots_offset, string_data_offset, ClassDescriptor, Object, StringObject,
 };
 
-// Old objects that may contain nursery pointers. All runtime calls, including
+// Addresses of old pointer fields that may contain nursery pointers.
+// Old objects do not move during minors; majors ignore and clear these slots. All runtime calls, including
 // barrier writes and collections, must occur on the same single runtime thread.
 thread_local! {
-    static REMEMBERED_SET: RefCell<HashSet<*mut Object>> =
+    static REMEMBERED_SET: RefCell<HashSet<*mut *mut Object>> =
         RefCell::new(HashSet::new());
 }
 
@@ -48,11 +49,10 @@ impl Region {
 /// Forwarding-flag bit in `gc_bits`. See module docs.
 pub(crate) const GC_FORWARDED_BIT: u32 = 0b1;
 
-/// Record `obj` in the remembered set for an active-tenured-to-nursery write,
+/// Record the field slot for an active-tenured-to-nursery write,
 /// then store `value` at `obj + field_offset` (`runtime-abi.md` §3.4).
-/// Codegen calls this for every heap pointer-field store. Minor collection scans
-/// all pointer fields of each remembered object to make sure any nursery pointers from
-/// the tenured space are followed and copied on a collection.
+/// Codegen calls this for every heap pointer-field store. Minor collection reads
+/// and repairs only recorded slots, using their current values after any overwrites.
 ///
 /// # Safety
 /// `obj` must point at a valid object with a pointer-typed field at
@@ -66,7 +66,7 @@ pub unsafe extern "C" fn lo_gc_write_barrier(
     let slot = (obj as *mut u8).add(field_offset as usize) as *mut *mut Object;
     if crate::alloc::in_tenure(obj) && crate::alloc::in_nursery(value) {
         REMEMBERED_SET.with_borrow_mut(|set| {
-            set.insert(obj);
+            set.insert(slot);
         });
     }
     *slot = value;
@@ -209,17 +209,14 @@ pub(crate) unsafe fn collect(force_major: bool) {
         frame = (*frame).parent;
     }
 
-    // On a minor allocation, check remembered set. Any pointer fields that point into the nursery
-    // are copied, otherwise they remain the same
+    // Old objects stay put during minors, so recorded field addresses are valid.
+    // Read current values: a recorded field may since have become null or old.
+    // Majors must not dereference these slots: they relocate owners, then clear
+    // the set without retaining any addresses into the evacuated space.
     if !major_alloc {
         REMEMBERED_SET.with_borrow_mut(|set| {
-            for obj in set.drain() {
-                let class = (*obj).class_descriptor;
-                for i in 0..(*class).pointer_count as usize {
-                    let off = *(*class).pointer_offsets.add(i) as usize;
-                    let slot = (obj as *mut u8).add(off) as *mut *mut Object;
-                    *slot = forward(*slot, &from_regions, &mut free, destination_limit);
-                }
+            for slot in set.drain() {
+                *slot = forward(*slot, &from_regions, &mut free, destination_limit);
             }
         })
     }
