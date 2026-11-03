@@ -1,0 +1,43 @@
+{
+  "date": "2026-11-03 02:15:13",
+  "machine": "x86_64",
+  "cpu": "VirtualApple @ 2.50GHz",
+  "cpus": 12,
+  "reps": 11,
+  "plain_reps": 3,
+  "scale": 1.0,
+  "archives": {
+    "cheney/timed": [
+      "/tmp/t/cheney.timed.a",
+      "e95cacb28c0a1b0a"
+    ],
+    "cheney/plain": [
+      "/tmp/t/cheney.plain.a",
+      "560c5e65f42cc216"
+    ],
+    "markcompact/timed": [
+      "/tmp/t/markcompact.timed.a",
+      "64f9d7ae6dfb0f0c"
+    ],
+    "markcompact/plain": [
+      "/tmp/t/markcompact.plain.a",
+      "768c168f03b950dd"
+    ],
+    "pushed/timed": [
+      "/tmp/t/pushed.timed.a",
+      "480329aae9f6a507"
+    ],
+    "pushed/plain": [
+      "/tmp/t/pushed.plain.a",
+      "6e90e730693efa75"
+    ],
+    "mine/timed": [
+      "/tmp/t/mine.timed.a",
+      "b9f19b890fdefc24"
+    ],
+    "mine/plain": [
+      "/tmp/t/mine.plain.a",
+      "bc22022320c1499c"
+    ]
+  }
+}

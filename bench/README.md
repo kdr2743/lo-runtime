@@ -61,8 +61,12 @@ suite:
 
 ```
 bench/docker.sh [--reps N] [--scale F] [--only REGEX] [--out DIR] \
-    cheney=origin/main pushed=origin/generational mine=HEAD -- /path/to/lo-compiler
+    cheney=origin/main markcompact=origin/feat/mark-compact-gc --diddy -- /path/to/lo-compiler
 ```
+
+`--diddy` is shorthand for `diddy=HEAD`: it adds the *diddy collector*, the generational
+collector of the branch checked out in this repository, under the label `diddy`. Any
+`LABEL=GITREF` works the same way.
 
 To compare against an older or alternative collector, `bench/add-gc-timing.py RUST_DIR`
 gives it the same timer (it wraps the one `unsafe fn collect` in `src/gc.rs`; `docker.sh`

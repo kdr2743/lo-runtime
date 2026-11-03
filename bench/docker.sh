@@ -1,8 +1,11 @@
 #!/usr/bin/env bash
 # Run the benchmark suite in an x86-64 Linux container (for Apple Silicon / any non-x86 host).
 #
-#   bench/docker.sh [--reps N] [--scale F] [--only REGEX] [--out DIR] LABEL=GITREF ... \
+#   bench/docker.sh [--reps N] [--scale F] [--only REGEX] [--out DIR] [--diddy] LABEL=GITREF ... \
 #                   -- /path/to/lo-compiler-checkout
+#
+# `--diddy` adds the "diddy collector" (the generational collector of the branch checked out
+# in this repository, HEAD) under the label `diddy`; it is shorthand for `diddy=HEAD`.
 #
 # For every LABEL=GITREF the runtime (rust/) at that ref is exported from this repository,
 # given the gc-time timer if it does not have it (add-gc-timing.py), and built twice:
@@ -20,6 +23,7 @@ while [ $# -gt 0 ]; do
     --scale) scale=$2; shift 2;;
     --only) only=$2; shift 2;;
     --out) out=$2; shift 2;;
+    --diddy) refs+=("diddy=HEAD"); shift;;
     --) compiler_src=$2; shift 2;;
     *=*) refs+=("$1"); shift;;
     *) echo "unknown argument: $1" >&2; exit 2;;
