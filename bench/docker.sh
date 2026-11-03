@@ -1,16 +1,16 @@
 #!/usr/bin/env bash
 # Run the benchmark suite in an x86-64 Linux container (for Apple Silicon / any non-x86 host).
 #
-#   bench/docker.sh [--reps N] [--scale F] [--only REGEX] [--out DIR] [--all | --diddy] LABEL=GITREF ... \
+#   bench/docker.sh [--reps N] [--scale F] [--only REGEX] [--out DIR] [--all | --modified-generational] LABEL=GITREF ... \
 #                   -- /path/to/lo-compiler-checkout
 #
 # With no LABEL=GITREF and no flag, all four collectors are compared (same as `--all`):
 # the Cheney reference (origin/main), mark-compact (origin/feat/mark-compact-gc), the earlier
-# generational collector (origin/generational) and the diddy collector (HEAD). Run
+# generational collector (origin/generational) and the modified generational collector (HEAD). Run
 # `git fetch` first so those refs are current.
 #
-# `--diddy` adds the "diddy collector" (the generational collector of the branch checked out
-# in this repository, HEAD) under the label `diddy`; it is shorthand for `diddy=HEAD`.
+# `--modified-generational` adds the "modified generational collector" (the generational collector of the branch checked out
+# in this repository, HEAD) under the label `modified-generational`; it is shorthand for `modified-generational=HEAD`.
 #
 # For every LABEL=GITREF the runtime (rust/) at that ref is exported from this repository,
 # given the gc-time timer if it does not have it (add-gc-timing.py), and built twice:
@@ -28,17 +28,17 @@ while [ $# -gt 0 ]; do
     --scale) scale=$2; shift 2;;
     --only) only=$2; shift 2;;
     --out) out=$2; shift 2;;
-    --diddy) refs+=("diddy=HEAD"); shift;;
-    --all) refs+=("cheney=origin/main" "markcompact=origin/feat/mark-compact-gc" "generational=origin/generational" "diddy=HEAD"); shift;;
+    --modified-generational) refs+=("modified-generational=HEAD"); shift;;
+    --all) refs+=("cheney=origin/main" "markcompact=origin/feat/mark-compact-gc" "generational=origin/generational" "modified-generational=HEAD"); shift;;
     --) compiler_src=$2; shift 2;;
     *=*) refs+=("$1"); shift;;
     *) echo "unknown argument: $1" >&2; exit 2;;
   esac
 done
 [ -n "$compiler_src" ] || { sed -n 2,16p "$0" >&2; exit 2; }
-# No collectors named: compare all four (Cheney, mark-compact, generational, diddy).
+# No collectors named: compare all four (Cheney, mark-compact, generational, modified-generational).
 if [ ${#refs[@]} -eq 0 ]; then
-  refs=("cheney=origin/main" "markcompact=origin/feat/mark-compact-gc" "generational=origin/generational" "diddy=HEAD")
+  refs=("cheney=origin/main" "markcompact=origin/feat/mark-compact-gc" "generational=origin/generational" "modified-generational=HEAD")
 fi
 
 work="$(mktemp -d "${TMPDIR:-/tmp}/lo-bench.XXXXXX")"

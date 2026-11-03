@@ -31,12 +31,12 @@
       "/tmp/t/generational.plain.a",
       "6e90e730693efa75"
     ],
-    "diddy/timed": [
-      "/tmp/t/diddy.timed.a",
+    "modified-generational/timed": [
+      "/tmp/t/modified-generational.timed.a",
       "b9f19b890fdefc24"
     ],
-    "diddy/plain": [
-      "/tmp/t/diddy.plain.a",
+    "modified-generational/plain": [
+      "/tmp/t/modified-generational.plain.a",
       "bc22022320c1499c"
     ]
   }
