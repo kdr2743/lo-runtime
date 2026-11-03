@@ -45,7 +45,7 @@ On an x86-64 Linux host (linking needs `cc` and GNU ld):
 ```
 cargo build --release --lib --features gc-time            # in rust/ ; and without the feature for the overhead check
 python3 bench/bench.py run --compiler PATH/TO/lo-compiler \
-    --runtime mine=rust/target/release/liblo_runtime.a \
+    --runtime diddy=rust/target/release/liblo_runtime.a \
     --out bench/results/run-1
 python3 bench/bench.py report bench/results/run-1
 ```
@@ -60,9 +60,14 @@ git ref, builds the compiler and the archives inside an x86-64 container, and ru
 suite:
 
 ```
+bench/docker.sh --all -- /path/to/lo-compiler            # all four collectors, 11 reps
 bench/docker.sh [--reps N] [--scale F] [--only REGEX] [--out DIR] \
     cheney=origin/main markcompact=origin/feat/mark-compact-gc --diddy -- /path/to/lo-compiler
 ```
+
+`--all` compares the four collectors: the Cheney reference (`origin/main`), mark-compact
+(`origin/feat/mark-compact-gc`), the earlier generational collector (`origin/generational`)
+and the diddy collector (`HEAD`). Run `git fetch` first.
 
 `--diddy` is shorthand for `diddy=HEAD`: it adds the *diddy collector*, the generational
 collector of the branch checked out in this repository, under the label `diddy`. Any

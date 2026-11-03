@@ -15,20 +15,20 @@
       "/tmp/t/cheney.plain.a",
       "560c5e65f42cc216"
     ],
-    "pushed/timed": [
-      "/tmp/t/pushed.timed.a",
+    "generational/timed": [
+      "/tmp/t/generational.timed.a",
       "480329aae9f6a507"
     ],
-    "pushed/plain": [
-      "/tmp/t/pushed.plain.a",
+    "generational/plain": [
+      "/tmp/t/generational.plain.a",
       "6e90e730693efa75"
     ],
-    "mine/timed": [
-      "/tmp/t/mine.timed.a",
+    "diddy/timed": [
+      "/tmp/t/diddy.timed.a",
       "b9f19b890fdefc24"
     ],
-    "mine/plain": [
-      "/tmp/t/mine.plain.a",
+    "diddy/plain": [
+      "/tmp/t/diddy.plain.a",
       "bc22022320c1499c"
     ]
   }
