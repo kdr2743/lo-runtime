@@ -25,9 +25,9 @@ gc_cheney = []
 gc_mark_compact = []
 gc_generational = []
 # The hardened generational collector (large objects in tenured, 1/16 nursery,
-# gc-debug checker). Named after its author's nickname for it.
-gc_diddy = []
-# Debug-only GC instrumentation for the diddy collector (poison, heap checker).
+# gc-debug checker).
+gc_modified_generational = []
+# Debug-only GC instrumentation for the modified generational collector (poison, heap checker).
 gc-debug = []
 # Times every collection and prints `[lo-gc-time] ...` at exit (native only).
 gc-time = []

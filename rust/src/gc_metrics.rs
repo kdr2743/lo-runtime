@@ -160,9 +160,9 @@ pub fn collector_name() -> &'static str {
     {
         "generational"
     }
-    #[cfg(feature = "gc_diddy")]
+    #[cfg(feature = "gc_modified_generational")]
     {
-        "diddy"
+        "modified_generational"
     }
 }
 

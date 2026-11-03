@@ -6,11 +6,11 @@ Emits CSV under benchmarks/results/ and a comparison table on stdout.
 Example:
   python3 scripts/bench_gc.py
   python3 scripts/bench_gc.py --trials 5 --heap 4194304 --workloads churn,mixed
-  python3 scripts/bench_gc.py --collectors cheney,diddy        # compare a subset
+  python3 scripts/bench_gc.py --collectors cheney,modified_generational        # compare a subset
   python3 scripts/bench_gc.py --heap 1048576,16777216          # several heap sizes
 
 Compares four collectors by default: cheney (reference), mark_compact, generational
-(the earlier generational collector) and diddy (the hardened generational collector).
+(the earlier generational collector) and modified_generational (the hardened generational collector).
 """
 
 from __future__ import annotations
@@ -32,7 +32,7 @@ COLLECTORS = (
     ("cheney", "gc_cheney"),
     ("mark_compact", "gc_mark_compact"),
     ("generational", "gc_generational"),
-    ("diddy", "gc_diddy"),
+    ("modified_generational", "gc_modified_generational"),
 )
 
 DEFAULT_WORKLOADS = ("churn", "long_lived", "mixed", "explicit")
@@ -268,7 +268,7 @@ def print_comparison(
     heaps: list[int],
 ) -> None:
     print("\nMedian wall_ns / collections (non-OOM trials; OOM = every trial ran out of memory):")
-    header = f"{'heap':>10} {'workload':<12} {'collector':<14} {'wall_ns':>12} {'collections':>12} {'pause_sum':>12}"
+    header = f"{'heap':>10} {'workload':<12} {'collector':<22} {'wall_ns':>12} {'collections':>12} {'pause_sum':>12}"
     print(header)
     print("-" * len(header))
     for heap, workload, name in (
@@ -292,7 +292,7 @@ def print_comparison(
                 if r.get("gc_pause_ns_sum")
             ]
             print(
-                f"{heap:>10} {workload:<12} {name:<14} "
+                f"{heap:>10} {workload:<12} {name:<22} "
                 f"{median_or_empty(walls) or 'OOM':>12} "
                 f"{median_or_empty(cols):>12} {median_or_empty(pauses):>12}"
             )
