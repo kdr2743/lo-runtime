@@ -137,6 +137,7 @@ unsafe fn alloc_raw(size: usize, class: *const ClassDescriptor) -> *mut Object {
     (*obj).class_descriptor = class;
     (*obj).gc_bits = 0;
     (*obj).flags = 0;
+    crate::gc_metrics::record_alloc(size);
     obj
 }
 
@@ -248,4 +249,12 @@ pub fn heap_used() -> usize {
             (FREE as usize) - (FROM_BASE as usize)
         }
     }
+}
+
+/// Total backing heap capacity (both semispaces). Zero when uninitialized.
+/// Not part of the ABI.
+#[doc(hidden)]
+pub fn heap_size() -> usize {
+    // SAFETY: by-value read on the single runtime thread.
+    unsafe { HEAP_LAYOUT.map_or(0, |layout| layout.size()) }
 }
