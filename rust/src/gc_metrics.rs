@@ -160,6 +160,10 @@ pub fn collector_name() -> &'static str {
     {
         "generational"
     }
+    #[cfg(feature = "gc_diddy")]
+    {
+        "diddy"
+    }
 }
 
 /// Zero all counters. Call at the start of each bench trial.

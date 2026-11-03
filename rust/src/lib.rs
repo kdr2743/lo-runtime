@@ -25,23 +25,33 @@
 //! `unsafe` is contained to the FFI boundary and the allocator / shadow-stack
 //! modules, each access commented with the invariant it relies on.
 
-#[cfg(all(feature = "gc_cheney", feature = "gc_mark_compact"))]
-compile_error!("enable only one GC feature: gc_cheney, gc_mark_compact, or gc_generational");
-#[cfg(all(feature = "gc_cheney", feature = "gc_generational"))]
-compile_error!("enable only one GC feature: gc_cheney, gc_mark_compact, or gc_generational");
-#[cfg(all(feature = "gc_mark_compact", feature = "gc_generational"))]
-compile_error!("enable only one GC feature: gc_cheney, gc_mark_compact, or gc_generational");
+#[cfg(any(
+    all(feature = "gc_cheney", feature = "gc_mark_compact"),
+    all(feature = "gc_cheney", feature = "gc_generational"),
+    all(feature = "gc_cheney", feature = "gc_diddy"),
+    all(feature = "gc_mark_compact", feature = "gc_generational"),
+    all(feature = "gc_mark_compact", feature = "gc_diddy"),
+    all(feature = "gc_generational", feature = "gc_diddy"),
+))]
+compile_error!(
+    "enable only one GC feature: gc_cheney, gc_mark_compact, gc_generational, or gc_diddy"
+);
 #[cfg(not(any(
     feature = "gc_cheney",
     feature = "gc_mark_compact",
-    feature = "gc_generational"
+    feature = "gc_generational",
+    feature = "gc_diddy"
 )))]
-compile_error!("enable one GC feature: gc_cheney, gc_mark_compact, or gc_generational");
+compile_error!("enable one GC feature: gc_cheney, gc_mark_compact, gc_generational, or gc_diddy");
 
 mod abort;
 mod cast;
 mod descriptors;
+#[cfg(feature = "gc-debug")]
+mod gc_debug;
 mod gc_metrics;
+#[cfg(feature = "gc-time")]
+mod gc_time;
 mod init;
 mod io;
 mod object;
@@ -67,6 +77,13 @@ mod gc;
 mod alloc;
 #[cfg(feature = "gc_generational")]
 #[path = "gc_variants/generational/gc.rs"]
+mod gc;
+
+#[cfg(feature = "gc_diddy")]
+#[path = "gc_variants/diddy/alloc.rs"]
+mod alloc;
+#[cfg(feature = "gc_diddy")]
+#[path = "gc_variants/diddy/gc.rs"]
 mod gc;
 
 // --- Public C-ABI surface, re-exported at the crate root --------------------
@@ -100,6 +117,10 @@ pub use string_ops::{
 // Debug/test hooks (not part of the ABI).
 #[doc(hidden)]
 pub use alloc::{heap_size, heap_used};
+// Only the diddy variant has a separately sized nursery that tests need to see.
+#[cfg(feature = "gc_diddy")]
+#[doc(hidden)]
+pub use alloc::nursery_size;
 #[doc(hidden)]
 pub use gc_metrics::{collector_name, reset as reset_gc_metrics, snapshot as gc_metrics_snapshot};
 #[doc(hidden)]

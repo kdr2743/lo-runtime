@@ -6,6 +6,11 @@ Emits CSV under benchmarks/results/ and a comparison table on stdout.
 Example:
   python3 scripts/bench_gc.py
   python3 scripts/bench_gc.py --trials 5 --heap 4194304 --workloads churn,mixed
+  python3 scripts/bench_gc.py --collectors cheney,diddy        # compare a subset
+  python3 scripts/bench_gc.py --heap 1048576,16777216          # several heap sizes
+
+Compares four collectors by default: cheney (reference), mark_compact, generational
+(the earlier generational collector) and diddy (the hardened generational collector).
 """
 
 from __future__ import annotations
@@ -27,6 +32,7 @@ COLLECTORS = (
     ("cheney", "gc_cheney"),
     ("mark_compact", "gc_mark_compact"),
     ("generational", "gc_generational"),
+    ("diddy", "gc_diddy"),
 )
 
 DEFAULT_WORKLOADS = ("churn", "long_lived", "mixed", "explicit")
@@ -151,9 +157,14 @@ def main() -> int:
     )
     parser.add_argument(
         "--heap",
-        type=int,
-        default=16 * 1024 * 1024,
-        help="LO_HEAP_SIZE in bytes (default 16 MiB)",
+        default=str(16 * 1024 * 1024),
+        help="LO_HEAP_SIZE in bytes; comma-separated to sweep several (default 16 MiB)",
+    )
+    parser.add_argument(
+        "--collectors",
+        default=",".join(name for name, _ in COLLECTORS),
+        help="comma-separated subset of: " + ", ".join(name for name, _ in COLLECTORS)
+        + " (default: all four)",
     )
     parser.add_argument(
         "--workloads",
@@ -175,30 +186,43 @@ def main() -> int:
     workloads = [w.strip() for w in args.workloads.split(",") if w.strip()]
     if not workloads:
         parser.error("no workloads")
+    wanted = [c.strip() for c in args.collectors.split(",") if c.strip()]
+    known = {name for name, _ in COLLECTORS}
+    unknown = [c for c in wanted if c not in known]
+    if unknown or not wanted:
+        parser.error(f"unknown collector(s) {unknown}; choose from {sorted(known)}")
+    collectors = [(n, f) for n, f in COLLECTORS if n in wanted]
+    heaps = [int(h) for h in args.heap.split(",") if h.strip()]
+    if not heaps:
+        parser.error("no heap sizes")
 
     RESULTS.mkdir(parents=True, exist_ok=True)
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     out_path = RESULTS / f"gc-bench-{stamp}.csv"
 
     rows: list[dict[str, str]] = []
-    for name, feature in COLLECTORS:
+    for name, feature in collectors:
         if not args.skip_build:
             cargo_build(feature)
-        for workload in workloads:
-            print(f"== {name} / {workload} ({args.trials} trials) ==", flush=True)
-            for trial in range(1, args.trials + 1):
-                fields = run_one(feature, workload, args.heap, args.iters, {})
-                fields["trial"] = str(trial)
-                # Prefer the binary's collector= field when present.
-                fields.setdefault("collector", name)
-                rows.append(fields)
-                wall = fields.get("wall_ns", "")
-                cols = fields.get("collections", "")
-                oom = fields.get("oom", "0")
+        for heap in heaps:
+            for workload in workloads:
                 print(
-                    f"  trial {trial}: wall_ns={wall} collections={cols} oom={oom}",
+                    f"== {name} / {workload} / heap={heap} ({args.trials} trials) ==",
                     flush=True,
                 )
+                for trial in range(1, args.trials + 1):
+                    fields = run_one(feature, workload, heap, args.iters, {})
+                    fields["trial"] = str(trial)
+                    # Prefer the binary's collector= field when present.
+                    fields.setdefault("collector", name)
+                    rows.append(fields)
+                    wall = fields.get("wall_ns", "")
+                    cols = fields.get("collections", "")
+                    oom = fields.get("oom", "0")
+                    print(
+                        f"  trial {trial}: wall_ns={wall} collections={cols} oom={oom}",
+                        flush=True,
+                    )
 
     fieldnames = [
         "collector",
@@ -229,7 +253,7 @@ def main() -> int:
             writer.writerow({k: row.get(k, "") for k in fieldnames})
 
     print(f"\nWrote {out_path}")
-    print_comparison(rows, workloads)
+    print_comparison(rows, workloads, [n for n, _ in collectors], heaps)
     # Stable "latest" copy for convenience.
     latest = RESULTS / "latest.csv"
     latest.write_text(out_path.read_text())
@@ -237,18 +261,26 @@ def main() -> int:
     return 0
 
 
-def print_comparison(rows: list[dict[str, str]], workloads: list[str]) -> None:
-    print("\nMedian wall_ns / collections (non-OOM trials):")
-    header = f"{'workload':<12} {'collector':<14} {'wall_ns':>12} {'collections':>12} {'pause_sum':>12}"
+def print_comparison(
+    rows: list[dict[str, str]],
+    workloads: list[str],
+    collectors: list[str],
+    heaps: list[int],
+) -> None:
+    print("\nMedian wall_ns / collections (non-OOM trials; OOM = every trial ran out of memory):")
+    header = f"{'heap':>10} {'workload':<12} {'collector':<14} {'wall_ns':>12} {'collections':>12} {'pause_sum':>12}"
     print(header)
     print("-" * len(header))
-    for workload in workloads:
-        for name, _feature in COLLECTORS:
+    for heap, workload, name in (
+        (h, w, c) for h in heaps for w in workloads for c in collectors
+    ):
+        if True:
             subset = [
                 r
                 for r in rows
                 if r.get("collector") == name
                 and r.get("workload") == workload
+                and r.get("heap") == str(heap)
                 and r.get("oom") != "1"
                 and r.get("wall_ns")
             ]
@@ -260,7 +292,8 @@ def print_comparison(rows: list[dict[str, str]], workloads: list[str]) -> None:
                 if r.get("gc_pause_ns_sum")
             ]
             print(
-                f"{workload:<12} {name:<14} {median_or_empty(walls):>12} "
+                f"{heap:>10} {workload:<12} {name:<14} "
+                f"{median_or_empty(walls) or 'OOM':>12} "
                 f"{median_or_empty(cols):>12} {median_or_empty(pauses):>12}"
             )
 
