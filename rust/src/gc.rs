@@ -158,11 +158,22 @@ unsafe fn forward(
 }
 
 /// Collect with immediate promotion; `force_major` bypasses minor selection.
+/// With the `gc-time` feature the whole collection is timed (`gc_time.rs`);
+/// without it this is a plain call.
 ///
 /// # Safety
 /// The heap and shadow-stack roots must be valid on the single runtime thread.
 /// All old-to-young pointer stores must have passed through the write barrier.
 pub(crate) unsafe fn collect(force_major: bool) {
+    #[cfg(feature = "gc-time")]
+    let timer = crate::gc_time::start();
+    collect_inner(force_major);
+    #[cfg(feature = "gc-time")]
+    crate::gc_time::stop(timer);
+}
+
+/// The collection itself; see [`collect`] for the contract.
+unsafe fn collect_inner(force_major: bool) {
     let (tenure_from_base, tenure_from_limit) = crate::alloc::tenure_from_space();
     let (nursery_base, nursery_limit) = crate::alloc::nursery_space();
     let nursery_free = crate::alloc::nursery_free();
@@ -421,6 +432,21 @@ mod tests {
                 assert_eq!(heap_used(), 48);
             }
             lo_pop_frame();
+        });
+    }
+
+    #[cfg(feature = "gc-time")]
+    #[test]
+    fn gc_time_counts_every_collection_and_tracks_the_longest_pause() {
+        with_runtime(Some("4096"), || unsafe {
+            let (n0, total0, _) = crate::gc_time::totals();
+            super::collect(false);
+            super::collect(false);
+            lo_gc_collect();
+            let (n1, total1, max1) = crate::gc_time::totals();
+            assert_eq!(n1 - n0, 3);
+            assert!(total1 >= total0);
+            assert!(max1 <= total1);
         });
     }
 

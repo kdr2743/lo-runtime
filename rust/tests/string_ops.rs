@@ -266,10 +266,12 @@ fn string_larger_than_nursery_allocates_on_a_small_heap() {
 fn string_larger_than_the_whole_heap_exits_137() {
     let output = run_repeat_probe("1000000", Some("65536"));
     assert_eq!(output.status.code(), Some(137));
-    // Under `gc-debug` the failed major collection logs lines first; the abort
-    // message is always the last line.
-    assert!(
-        String::from_utf8_lossy(&output.stderr).ends_with("lo_alloc: out of memory\n"),
-        "{output:?}"
-    );
+    // Under `gc-debug` the failed major collection logs lines first, and under
+    // `gc-time` the exit hook appends a timing line; the abort message is always
+    // the last line besides those.
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let last = stderr
+        .lines()
+        .rfind(|line| !line.starts_with("[lo-gc-time]"));
+    assert_eq!(last, Some("lo_alloc: out of memory"), "{output:?}");
 }

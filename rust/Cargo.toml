@@ -22,6 +22,9 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 # and logging). Off by default; a cargo feature rather than an env var so it also
 # works on wasm32, which has no environment. See src/gc_debug.rs.
 gc-debug = []
+# Times every collection and prints `[lo-gc-time] ...` at exit (native only; a
+# no-op on wasm32). The measurement hook for the benchmark suite in bench/.
+gc-time = []
 
 [profile.release]
 lto = "thin"

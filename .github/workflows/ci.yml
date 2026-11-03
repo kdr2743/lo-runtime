@@ -26,12 +26,15 @@ jobs:
           cargo build
           cargo build --target wasm32-unknown-unknown
           cargo build --target wasm32-unknown-unknown --features gc-debug
+          cargo build --target wasm32-unknown-unknown --features gc-time
           cargo test
           cargo test --features gc-debug
           cargo test --release
           cargo test --release --features gc-debug
+          cargo test --release --features gc-time
           cargo clippy --all-targets -- -D warnings
           cargo clippy --all-targets --features gc-debug -- -D warnings
+          cargo clippy --all-targets --features gc-time -- -D warnings
           cargo fmt --check
 
   zig:

@@ -27,6 +27,8 @@ mod descriptors;
 mod gc;
 #[cfg(feature = "gc-debug")]
 mod gc_debug;
+#[cfg(feature = "gc-time")]
+mod gc_time;
 mod init;
 mod io;
 mod object;
