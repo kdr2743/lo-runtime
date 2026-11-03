@@ -1,0 +1,4 @@
+results/*/asm/
+results/*/bin/
+results/*/programs/
+__pycache__/
