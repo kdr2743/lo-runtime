@@ -1,0 +1,143 @@
+<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 1060 670' width='1060' height='670'><rect width='100%' height='100%' fill='#ffffff'/><text x='20' y='26' font-family='-apple-system,Segoe UI,Helvetica,Arial,sans-serif' font-size='16' font-weight='700' fill='#1a202c'>old_to_young</text>
+<circle cx='25' cy='48' r='4' fill='#2b6cb0'/>
+<text x='34' y='52' font-family='-apple-system,Segoe UI,Helvetica,Arial,sans-serif' font-size='12' fill='#1a202c'>cheney</text>
+<circle cx='90.2' cy='48' r='4' fill='#d9822b'/>
+<text x='99.2' y='52' font-family='-apple-system,Segoe UI,Helvetica,Arial,sans-serif' font-size='12' fill='#1a202c'>generational</text>
+<circle cx='198.60000000000002' cy='48' r='4' fill='#1f9d55'/>
+<text x='207.60000000000002' y='52' font-family='-apple-system,Segoe UI,Helvetica,Arial,sans-serif' font-size='12' fill='#1a202c'>diddy</text>
+<g stroke='#5f6b7a' stroke-width='2'><line x1='255.60000000000002' y1='44' x2='263.6' y2='52'/><line x1='255.60000000000002' y1='52' x2='263.6' y2='44'/></g>
+<text x='269.6' y='52' font-family='-apple-system,Segoe UI,Helvetica,Arial,sans-serif' font-size='12' fill='#5f6b7a'>out of memory</text>
+<g>
+<text x='66' y='76' font-family='-apple-system,Segoe UI,Helvetica,Arial,sans-serif' font-size='12' font-weight='600' fill='#1a202c'>GC time - 16 MiB heap (default)</text>
+<line x1='66' y1='322.0' x2='518' y2='322.0' stroke='#e3e8ee'/>
+<text x='60' y='326.0' text-anchor='end' font-family='-apple-system,Segoe UI,Helvetica,Arial,sans-serif' font-size='10' fill='#5f6b7a'>0.01</text>
+<line x1='66' y1='263.0' x2='518' y2='263.0' stroke='#e3e8ee'/>
+<text x='60' y='267.0' text-anchor='end' font-family='-apple-system,Segoe UI,Helvetica,Arial,sans-serif' font-size='10' fill='#5f6b7a'>0.1</text>
+<line x1='66' y1='204.0' x2='518' y2='204.0' stroke='#e3e8ee'/>
+<text x='60' y='208.0' text-anchor='end' font-family='-apple-system,Segoe UI,Helvetica,Arial,sans-serif' font-size='10' fill='#5f6b7a'>1</text>
+<line x1='66' y1='145.0' x2='518' y2='145.0' stroke='#e3e8ee'/>
+<text x='60' y='149.0' text-anchor='end' font-family='-apple-system,Segoe UI,Helvetica,Arial,sans-serif' font-size='10' fill='#5f6b7a'>10</text>
+<line x1='66' y1='86.0' x2='518' y2='86.0' stroke='#e3e8ee'/>
+<text x='60' y='90.0' text-anchor='end' font-family='-apple-system,Segoe UI,Helvetica,Arial,sans-serif' font-size='10' fill='#5f6b7a'>100</text>
+<rect x='66' y='86' width='452' height='236' fill='none' stroke='#5f6b7a' stroke-opacity='0.5'/>
+<text x='141.3' y='337' text-anchor='middle' font-family='-apple-system,Segoe UI,Helvetica,Arial,sans-serif' font-size='10' fill='#5f6b7a'>100</text>
+<text x='292.0' y='337' text-anchor='middle' font-family='-apple-system,Segoe UI,Helvetica,Arial,sans-serif' font-size='10' fill='#5f6b7a'>10k</text>
+<text x='442.7' y='337' text-anchor='middle' font-family='-apple-system,Segoe UI,Helvetica,Arial,sans-serif' font-size='10' fill='#5f6b7a'>50k</text>
+<text x='22' y='204.0' transform='rotate(-90 22 204.0)' text-anchor='middle' font-family='-apple-system,Segoe UI,Helvetica,Arial,sans-serif' font-size='10' fill='#5f6b7a'>ms</text>
+<polyline points='137.8,268.9 288.5,197.2 439.2,148.6' fill='none' stroke='#2b6cb0' stroke-width='1.6' stroke-opacity='0.85'/>
+<line x1='137.8' y1='270.0' x2='137.8' y2='264.2' stroke='#2b6cb0' stroke-width='1' stroke-opacity='0.7'/>
+<circle cx='137.8' cy='268.9' r='3.2' fill='#2b6cb0'><title>cheney: 0.0793 ms</title></circle>
+<line x1='288.5' y1='197.6' x2='288.5' y2='195.8' stroke='#2b6cb0' stroke-width='1' stroke-opacity='0.7'/>
+<circle cx='288.5' cy='197.2' r='3.2' fill='#2b6cb0'><title>cheney: 1.31 ms</title></circle>
+<line x1='439.2' y1='148.9' x2='439.2' y2='148.4' stroke='#2b6cb0' stroke-width='1' stroke-opacity='0.7'/>
+<circle cx='439.2' cy='148.6' r='3.2' fill='#2b6cb0'><title>cheney: 8.68 ms</title></circle>
+<polyline points='141.3,202.6 292.0,174.5 442.7,135.8' fill='none' stroke='#d9822b' stroke-width='1.6' stroke-opacity='0.85'/>
+<line x1='141.3' y1='203.5' x2='141.3' y2='198.1' stroke='#d9822b' stroke-width='1' stroke-opacity='0.7'/>
+<circle cx='141.3' cy='202.6' r='3.2' fill='#d9822b'><title>generational: 1.06 ms</title></circle>
+<line x1='292.0' y1='175.3' x2='292.0' y2='162.4' stroke='#d9822b' stroke-width='1' stroke-opacity='0.7'/>
+<circle cx='292.0' cy='174.5' r='3.2' fill='#d9822b'><title>generational: 3.16 ms</title></circle>
+<line x1='442.7' y1='136.1' x2='442.7' y2='134.8' stroke='#d9822b' stroke-width='1' stroke-opacity='0.7'/>
+<circle cx='442.7' cy='135.8' r='3.2' fill='#d9822b'><title>generational: 14.3 ms</title></circle>
+<polyline points='144.8,202.9 295.5,149.4 446.2,110.5' fill='none' stroke='#1f9d55' stroke-width='1.6' stroke-opacity='0.85'/>
+<line x1='144.8' y1='203.1' x2='144.8' y2='188.5' stroke='#1f9d55' stroke-width='1' stroke-opacity='0.7'/>
+<circle cx='144.8' cy='202.9' r='3.2' fill='#1f9d55'><title>diddy: 1.05 ms</title></circle>
+<line x1='295.5' y1='149.7' x2='295.5' y2='146.7' stroke='#1f9d55' stroke-width='1' stroke-opacity='0.7'/>
+<circle cx='295.5' cy='149.4' r='3.2' fill='#1f9d55'><title>diddy: 8.41 ms</title></circle>
+<line x1='446.2' y1='110.8' x2='446.2' y2='106.3' stroke='#1f9d55' stroke-width='1' stroke-opacity='0.7'/>
+<circle cx='446.2' cy='110.5' r='3.2' fill='#1f9d55'><title>diddy: 38.4 ms</title></circle>
+</g>
+<g>
+<text x='66' y='376' font-family='-apple-system,Segoe UI,Helvetica,Arial,sans-serif' font-size='12' font-weight='600' fill='#1a202c'>longest pause - 16 MiB heap (default) - x: holders</text>
+<line x1='66' y1='622.0' x2='518' y2='622.0' stroke='#e3e8ee'/>
+<text x='60' y='626.0' text-anchor='end' font-family='-apple-system,Segoe UI,Helvetica,Arial,sans-serif' font-size='10' fill='#5f6b7a'>0.01</text>
+<line x1='66' y1='543.3' x2='518' y2='543.3' stroke='#e3e8ee'/>
+<text x='60' y='547.3' text-anchor='end' font-family='-apple-system,Segoe UI,Helvetica,Arial,sans-serif' font-size='10' fill='#5f6b7a'>0.1</text>
+<line x1='66' y1='464.7' x2='518' y2='464.7' stroke='#e3e8ee'/>
+<text x='60' y='468.7' text-anchor='end' font-family='-apple-system,Segoe UI,Helvetica,Arial,sans-serif' font-size='10' fill='#5f6b7a'>1</text>
+<line x1='66' y1='386.0' x2='518' y2='386.0' stroke='#e3e8ee'/>
+<text x='60' y='390.0' text-anchor='end' font-family='-apple-system,Segoe UI,Helvetica,Arial,sans-serif' font-size='10' fill='#5f6b7a'>10</text>
+<rect x='66' y='386' width='452' height='236' fill='none' stroke='#5f6b7a' stroke-opacity='0.5'/>
+<text x='141.3' y='637' text-anchor='middle' font-family='-apple-system,Segoe UI,Helvetica,Arial,sans-serif' font-size='10' fill='#5f6b7a'>100</text>
+<text x='292.0' y='637' text-anchor='middle' font-family='-apple-system,Segoe UI,Helvetica,Arial,sans-serif' font-size='10' fill='#5f6b7a'>10k</text>
+<text x='442.7' y='637' text-anchor='middle' font-family='-apple-system,Segoe UI,Helvetica,Arial,sans-serif' font-size='10' fill='#5f6b7a'>50k</text>
+<text x='22' y='504.0' transform='rotate(-90 22 504.0)' text-anchor='middle' font-family='-apple-system,Segoe UI,Helvetica,Arial,sans-serif' font-size='10' fill='#5f6b7a'>ms</text>
+<polyline points='137.8,557.6 288.5,522.2 439.2,482.9' fill='none' stroke='#2b6cb0' stroke-width='1.6' stroke-opacity='0.85'/>
+<circle cx='137.8' cy='557.6' r='3.2' fill='#2b6cb0'><title>cheney: 0.0659 ms</title></circle>
+<circle cx='288.5' cy='522.2' r='3.2' fill='#2b6cb0'><title>cheney: 0.185 ms</title></circle>
+<circle cx='439.2' cy='482.9' r='3.2' fill='#2b6cb0'><title>cheney: 0.587 ms</title></circle>
+<polyline points='141.3,463.5 292.0,459.3 442.7,447.1' fill='none' stroke='#d9822b' stroke-width='1.6' stroke-opacity='0.85'/>
+<circle cx='141.3' cy='463.5' r='3.2' fill='#d9822b'><title>generational: 1.03 ms</title></circle>
+<circle cx='292.0' cy='459.3' r='3.2' fill='#d9822b'><title>generational: 1.17 ms</title></circle>
+<circle cx='442.7' cy='447.1' r='3.2' fill='#d9822b'><title>generational: 1.67 ms</title></circle>
+<polyline points='144.8,465.6 295.5,461.8 446.2,459.3' fill='none' stroke='#1f9d55' stroke-width='1.6' stroke-opacity='0.85'/>
+<circle cx='144.8' cy='465.6' r='3.2' fill='#1f9d55'><title>diddy: 0.974 ms</title></circle>
+<circle cx='295.5' cy='461.8' r='3.2' fill='#1f9d55'><title>diddy: 1.09 ms</title></circle>
+<circle cx='446.2' cy='459.3' r='3.2' fill='#1f9d55'><title>diddy: 1.17 ms</title></circle>
+</g>
+<g>
+<text x='586' y='76' font-family='-apple-system,Segoe UI,Helvetica,Arial,sans-serif' font-size='12' font-weight='600' fill='#1a202c'>GC time - 8M heap</text>
+<line x1='586' y1='322.0' x2='1038' y2='322.0' stroke='#e3e8ee'/>
+<text x='580' y='326.0' text-anchor='end' font-family='-apple-system,Segoe UI,Helvetica,Arial,sans-serif' font-size='10' fill='#5f6b7a'>0.01</text>
+<line x1='586' y1='263.0' x2='1038' y2='263.0' stroke='#e3e8ee'/>
+<text x='580' y='267.0' text-anchor='end' font-family='-apple-system,Segoe UI,Helvetica,Arial,sans-serif' font-size='10' fill='#5f6b7a'>0.1</text>
+<line x1='586' y1='204.0' x2='1038' y2='204.0' stroke='#e3e8ee'/>
+<text x='580' y='208.0' text-anchor='end' font-family='-apple-system,Segoe UI,Helvetica,Arial,sans-serif' font-size='10' fill='#5f6b7a'>1</text>
+<line x1='586' y1='145.0' x2='1038' y2='145.0' stroke='#e3e8ee'/>
+<text x='580' y='149.0' text-anchor='end' font-family='-apple-system,Segoe UI,Helvetica,Arial,sans-serif' font-size='10' fill='#5f6b7a'>10</text>
+<line x1='586' y1='86.0' x2='1038' y2='86.0' stroke='#e3e8ee'/>
+<text x='580' y='90.0' text-anchor='end' font-family='-apple-system,Segoe UI,Helvetica,Arial,sans-serif' font-size='10' fill='#5f6b7a'>100</text>
+<rect x='586' y='86' width='452' height='236' fill='none' stroke='#5f6b7a' stroke-opacity='0.5'/>
+<text x='661.3' y='337' text-anchor='middle' font-family='-apple-system,Segoe UI,Helvetica,Arial,sans-serif' font-size='10' fill='#5f6b7a'>100</text>
+<text x='812.0' y='337' text-anchor='middle' font-family='-apple-system,Segoe UI,Helvetica,Arial,sans-serif' font-size='10' fill='#5f6b7a'>10k</text>
+<text x='962.7' y='337' text-anchor='middle' font-family='-apple-system,Segoe UI,Helvetica,Arial,sans-serif' font-size='10' fill='#5f6b7a'>50k</text>
+<text x='542' y='204.0' transform='rotate(-90 542 204.0)' text-anchor='middle' font-family='-apple-system,Segoe UI,Helvetica,Arial,sans-serif' font-size='10' fill='#5f6b7a'>ms</text>
+<polyline points='657.8,264.6 808.5,178.4 959.2,112.9' fill='none' stroke='#2b6cb0' stroke-width='1.6' stroke-opacity='0.85'/>
+<line x1='657.8' y1='266.9' x2='657.8' y2='258.2' stroke='#2b6cb0' stroke-width='1' stroke-opacity='0.7'/>
+<circle cx='657.8' cy='264.6' r='3.2' fill='#2b6cb0'><title>cheney: 0.0938 ms</title></circle>
+<line x1='808.5' y1='178.9' x2='808.5' y2='177.5' stroke='#2b6cb0' stroke-width='1' stroke-opacity='0.7'/>
+<circle cx='808.5' cy='178.4' r='3.2' fill='#2b6cb0'><title>cheney: 2.72 ms</title></circle>
+<line x1='959.2' y1='113.2' x2='959.2' y2='111.9' stroke='#2b6cb0' stroke-width='1' stroke-opacity='0.7'/>
+<circle cx='959.2' cy='112.9' r='3.2' fill='#2b6cb0'><title>cheney: 35 ms</title></circle>
+<polyline points='661.3,210.0 812.0,162.7 962.7,118.9' fill='none' stroke='#d9822b' stroke-width='1.6' stroke-opacity='0.85'/>
+<line x1='661.3' y1='210.7' x2='661.3' y2='206.8' stroke='#d9822b' stroke-width='1' stroke-opacity='0.7'/>
+<circle cx='661.3' cy='210.0' r='3.2' fill='#d9822b'><title>generational: 0.79 ms</title></circle>
+<line x1='812.0' y1='163.1' x2='812.0' y2='162.4' stroke='#d9822b' stroke-width='1' stroke-opacity='0.7'/>
+<circle cx='812.0' cy='162.7' r='3.2' fill='#d9822b'><title>generational: 5 ms</title></circle>
+<line x1='962.7' y1='119.1' x2='962.7' y2='118.3' stroke='#d9822b' stroke-width='1' stroke-opacity='0.7'/>
+<circle cx='962.7' cy='118.9' r='3.2' fill='#d9822b'><title>generational: 27.7 ms</title></circle>
+<polyline points='664.8,208.0 815.5,133.9 966.2,99.2' fill='none' stroke='#1f9d55' stroke-width='1.6' stroke-opacity='0.85'/>
+<line x1='664.8' y1='208.8' x2='664.8' y2='206.3' stroke='#1f9d55' stroke-width='1' stroke-opacity='0.7'/>
+<circle cx='664.8' cy='208.0' r='3.2' fill='#1f9d55'><title>diddy: 0.854 ms</title></circle>
+<line x1='815.5' y1='134.1' x2='815.5' y2='133.2' stroke='#1f9d55' stroke-width='1' stroke-opacity='0.7'/>
+<circle cx='815.5' cy='133.9' r='3.2' fill='#1f9d55'><title>diddy: 15.4 ms</title></circle>
+<line x1='966.2' y1='99.5' x2='966.2' y2='94.2' stroke='#1f9d55' stroke-width='1' stroke-opacity='0.7'/>
+<circle cx='966.2' cy='99.2' r='3.2' fill='#1f9d55'><title>diddy: 59.8 ms</title></circle>
+</g>
+<g>
+<text x='586' y='376' font-family='-apple-system,Segoe UI,Helvetica,Arial,sans-serif' font-size='12' font-weight='600' fill='#1a202c'>longest pause - 8M heap - x: holders</text>
+<line x1='586' y1='622.0' x2='1038' y2='622.0' stroke='#e3e8ee'/>
+<text x='580' y='626.0' text-anchor='end' font-family='-apple-system,Segoe UI,Helvetica,Arial,sans-serif' font-size='10' fill='#5f6b7a'>0.01</text>
+<line x1='586' y1='543.3' x2='1038' y2='543.3' stroke='#e3e8ee'/>
+<text x='580' y='547.3' text-anchor='end' font-family='-apple-system,Segoe UI,Helvetica,Arial,sans-serif' font-size='10' fill='#5f6b7a'>0.1</text>
+<line x1='586' y1='464.7' x2='1038' y2='464.7' stroke='#e3e8ee'/>
+<text x='580' y='468.7' text-anchor='end' font-family='-apple-system,Segoe UI,Helvetica,Arial,sans-serif' font-size='10' fill='#5f6b7a'>1</text>
+<line x1='586' y1='386.0' x2='1038' y2='386.0' stroke='#e3e8ee'/>
+<text x='580' y='390.0' text-anchor='end' font-family='-apple-system,Segoe UI,Helvetica,Arial,sans-serif' font-size='10' fill='#5f6b7a'>10</text>
+<rect x='586' y='386' width='452' height='236' fill='none' stroke='#5f6b7a' stroke-opacity='0.5'/>
+<text x='661.3' y='637' text-anchor='middle' font-family='-apple-system,Segoe UI,Helvetica,Arial,sans-serif' font-size='10' fill='#5f6b7a'>100</text>
+<text x='812.0' y='637' text-anchor='middle' font-family='-apple-system,Segoe UI,Helvetica,Arial,sans-serif' font-size='10' fill='#5f6b7a'>10k</text>
+<text x='962.7' y='637' text-anchor='middle' font-family='-apple-system,Segoe UI,Helvetica,Arial,sans-serif' font-size='10' fill='#5f6b7a'>50k</text>
+<text x='542' y='504.0' transform='rotate(-90 542 504.0)' text-anchor='middle' font-family='-apple-system,Segoe UI,Helvetica,Arial,sans-serif' font-size='10' fill='#5f6b7a'>ms</text>
+<polyline points='657.8,555.9 808.5,521.5 959.2,479.6' fill='none' stroke='#2b6cb0' stroke-width='1.6' stroke-opacity='0.85'/>
+<circle cx='657.8' cy='555.9' r='3.2' fill='#2b6cb0'><title>cheney: 0.0692 ms</title></circle>
+<circle cx='808.5' cy='521.5' r='3.2' fill='#2b6cb0'><title>cheney: 0.19 ms</title></circle>
+<circle cx='959.2' cy='479.6' r='3.2' fill='#2b6cb0'><title>cheney: 0.646 ms</title></circle>
+<polyline points='661.3,475.1 812.0,469.5 962.7,458.0' fill='none' stroke='#d9822b' stroke-width='1.6' stroke-opacity='0.85'/>
+<circle cx='661.3' cy='475.1' r='3.2' fill='#d9822b'><title>generational: 0.736 ms</title></circle>
+<circle cx='812.0' cy='469.5' r='3.2' fill='#d9822b'><title>generational: 0.867 ms</title></circle>
+<circle cx='962.7' cy='458.0' r='3.2' fill='#d9822b'><title>generational: 1.21 ms</title></circle>
+<polyline points='664.8,476.9 815.5,472.8 966.2,472.5' fill='none' stroke='#1f9d55' stroke-width='1.6' stroke-opacity='0.85'/>
+<circle cx='664.8' cy='476.9' r='3.2' fill='#1f9d55'><title>diddy: 0.699 ms</title></circle>
+<circle cx='815.5' cy='472.8' r='3.2' fill='#1f9d55'><title>diddy: 0.788 ms</title></circle>
+<circle cx='966.2' cy='472.5' r='3.2' fill='#1f9d55'><title>diddy: 0.794 ms</title></circle>
+</g></svg>

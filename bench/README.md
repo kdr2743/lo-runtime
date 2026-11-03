@@ -90,6 +90,18 @@ In the `--out` directory:
   output verdict (`OK`, `OOM`, `WRONG`). Open this in a spreadsheet.
 * `report.md`: validity checks, a table per benchmark family, and a summary.
 * `meta.json`: date, CPU, repetitions, and the sha256 of every archive that ran.
+* `plots/`: SVG charts (`python3 bench/plot.py DIR`, standard library only; `docker.sh` runs it for
+  you). One chart per benchmark family plus `summary.svg`, and an `index.html` that shows them all.
+  Open `plots/index.html` in a browser.
+
+## Reading the plots
+
+Each family chart has one column per heap size (default 16 MiB, then 8 MiB). The top row is total
+GC time, the bottom row the longest single pause. Both use a log scale, because the values span
+four orders of magnitude (0.1 ms to 1,000+ ms). A dot is the median of the repetitions and the whisker
+runs from the fastest to the slowest repetition. A `x` at the top of a panel means that collector ran out
+of memory at that point, so there is no number for it. `summary.svg` totals GC time and the longest
+pauses over the cells where every collector finished.
 
 ## How to tell the result can be trusted
 

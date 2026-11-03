@@ -16,7 +16,7 @@
 # given the gc-time timer if it does not have it (add-gc-timing.py), and built twice:
 # a timed archive and a plain one (for the timer-overhead check). The LO compiler is built
 # from the checkout after `--`. Results land in DIR (default bench/results): runs.csv (every run),
-# summary.csv (one row per cell: medians, min/max, CV) and report.md. Needs docker; the first run pulls rust:1-bookworm.
+# summary.csv (one row per cell: medians, min/max, CV), report.md and plots/ (SVG charts). Needs docker; the first run pulls rust:1-bookworm.
 set -euo pipefail
 
 here="$(cd "$(dirname "$0")" && pwd)"
@@ -72,4 +72,5 @@ docker run --rm --platform linux/amd64 -v "$work:/w" rust:1-bookworm bash -euc '
   python3 /w/bench.py report /w/out
 '
 mkdir -p "$out"; cp -R "$work/out/." "$out/"
+python3 "$here/plot.py" "$out" || echo "plotting skipped (plot.py failed)" >&2
 echo "results in $out (report.md)"
