@@ -52,7 +52,7 @@ pub(crate) const GC_FORWARDED_BIT: u32 = 0b1;
 /// then store `value` at `obj + field_offset` (`runtime-abi.md` §3.4).
 /// Codegen calls this for every heap pointer-field store. Minor collection scans
 /// all pointer fields of each remembered object to make sure any nursery pointers from
-/// the tenured space are followed and copied on a collection. 
+/// the tenured space are followed and copied on a collection.
 ///
 /// # Safety
 /// `obj` must point at a valid object with a pointer-typed field at
@@ -209,7 +209,7 @@ pub(crate) unsafe fn collect(force_major: bool) {
         frame = (*frame).parent;
     }
 
-    // On a minor allocation, check remembered set. Any pointer fields that point into the nursery 
+    // On a minor allocation, check remembered set. Any pointer fields that point into the nursery
     // are copied, otherwise they remain the same
     if !major_alloc {
         REMEMBERED_SET.with_borrow_mut(|set| {
