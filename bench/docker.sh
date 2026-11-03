@@ -4,9 +4,10 @@
 #   bench/docker.sh [--reps N] [--scale F] [--only REGEX] [--out DIR] [--all | --diddy] LABEL=GITREF ... \
 #                   -- /path/to/lo-compiler-checkout
 #
-# `--all` compares all four collectors: the Cheney reference (origin/main), mark-compact
-# (origin/feat/mark-compact-gc), the earlier generational collector (origin/generational)
-# and the diddy collector (HEAD). Run `git fetch` first so those refs are current.
+# With no LABEL=GITREF and no flag, all four collectors are compared (same as `--all`):
+# the Cheney reference (origin/main), mark-compact (origin/feat/mark-compact-gc), the earlier
+# generational collector (origin/generational) and the diddy collector (HEAD). Run
+# `git fetch` first so those refs are current.
 #
 # `--diddy` adds the "diddy collector" (the generational collector of the branch checked out
 # in this repository, HEAD) under the label `diddy`; it is shorthand for `diddy=HEAD`.
@@ -34,7 +35,11 @@ while [ $# -gt 0 ]; do
     *) echo "unknown argument: $1" >&2; exit 2;;
   esac
 done
-[ ${#refs[@]} -gt 0 ] && [ -n "$compiler_src" ] || { sed -n 2,12p "$0" >&2; exit 2; }
+[ -n "$compiler_src" ] || { sed -n 2,16p "$0" >&2; exit 2; }
+# No collectors named: compare all four (Cheney, mark-compact, generational, diddy).
+if [ ${#refs[@]} -eq 0 ]; then
+  refs=("cheney=origin/main" "markcompact=origin/feat/mark-compact-gc" "generational=origin/generational" "diddy=HEAD")
+fi
 
 work="$(mktemp -d "${TMPDIR:-/tmp}/lo-bench.XXXXXX")"
 trap 'rm -rf "$work"' EXIT

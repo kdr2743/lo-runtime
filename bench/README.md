@@ -60,7 +60,7 @@ git ref, builds the compiler and the archives inside an x86-64 container, and ru
 suite:
 
 ```
-bench/docker.sh --all -- /path/to/lo-compiler            # all four collectors, 11 reps
+bench/docker.sh -- /path/to/lo-compiler                  # all four collectors, 11 reps (same as --all)
 bench/docker.sh [--reps N] [--scale F] [--only REGEX] [--out DIR] \
     cheney=origin/main markcompact=origin/feat/mark-compact-gc --diddy -- /path/to/lo-compiler
 ```
