@@ -17,6 +17,10 @@
 //! retains its descriptor and a clear forwarding flag. This bit is private to
 //! the collector.
 
+#[cfg(debug_assertions)]
+#[path = "gc_debug.rs"]
+mod debug;
+
 use std::cell::RefCell;
 use std::collections::HashSet;
 
@@ -261,11 +265,27 @@ pub(crate) unsafe fn collect(force_major: bool) {
     }
     crate::alloc::reset_nursery();
     REMEMBERED_SET.with_borrow_mut(|set| set.clear());
+    #[cfg(debug_assertions)]
+    {
+        REMEMBERED_SET.with_borrow(|set| assert!(set.is_empty()));
+        let mut poisoned = vec![(nursery_base, nursery_limit)];
+        if major_alloc {
+            poisoned.push((tenure_from_base, tenure_from_limit));
+        }
+        debug::check(&poisoned);
+    }
 }
 
-/// Whether `LO_GC_POISON` requests poisoning evacuated regions: the nursery
+/// Debug builds always poison evacuated regions; release builds can opt in
+/// through `LO_GC_POISON`. Poisoned regions are: the nursery
 /// after every collection and the former active tenured space after majors.
 /// Read once and cached; freestanding WASM has no environment.
+#[cfg(debug_assertions)]
+fn poison_enabled() -> bool {
+    true
+}
+
+#[cfg(not(debug_assertions))]
 fn poison_enabled() -> bool {
     use std::sync::OnceLock;
     static POISON: OnceLock<bool> = OnceLock::new();
@@ -352,6 +372,43 @@ mod tests {
     }
     unsafe fn get_field(obj: *mut Object, off: usize) -> *mut Object {
         *((obj as *mut u8).add(off) as *mut *mut Object)
+    }
+
+    #[cfg(debug_assertions)]
+    #[test]
+    fn heap_checker_rejects_corrupt_fields_roots_headers_and_poison() {
+        with_runtime(Some("4096"), || unsafe {
+            let mut frame = TestFrame::<1>::new();
+            lo_push_frame(frame.as_frame());
+            frame.roots[0] = lo_alloc(&NODE_CLASS);
+            super::collect(false);
+            let obj = frame.roots[0];
+            let interior = (obj as *mut u8).add(8).cast::<Object>();
+            let rejected = || std::panic::catch_unwind(|| super::debug::check(&[])).is_err();
+            set_field(obj, 16, interior);
+            assert!(rejected(), "interior field pointer must fail");
+            set_field(obj, 16, core::ptr::null_mut());
+            frame.roots[0] = interior;
+            assert!(rejected(), "interior root pointer must fail");
+            frame.roots[0] = obj;
+            assert_eq!(frame.roots[0], obj);
+            (*obj).gc_bits = super::GC_FORWARDED_BIT;
+            assert!(rejected(), "forwarding flag in destination must fail");
+            (*obj).gc_bits = 0;
+            let descriptor = (*obj).class_descriptor;
+            (*obj).class_descriptor = obj.cast();
+            assert!(
+                rejected(),
+                "heap-resident metadata must fail before dereference"
+            );
+            (*obj).class_descriptor = descriptor;
+            let nursery = crate::alloc::nursery_space();
+            *nursery.0 = 0;
+            assert!(std::panic::catch_unwind(|| super::debug::check(&[nursery])).is_err());
+            *nursery.0 = 0xEF;
+            super::debug::check(&[nursery]);
+            lo_pop_frame();
+        });
     }
 
     #[test]
